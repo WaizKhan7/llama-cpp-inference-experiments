@@ -98,6 +98,46 @@ static float dot_product_error(const ggml_type_traits * qfns, const ggml_type_tr
     return fabsf(result - dot_ref) / test_size;
 }
 
+static void test_q4_hqq_roundtrip() {
+    const auto * qfns = ggml_get_type_traits(GGML_TYPE_Q4_HQQ);
+
+    std::vector<float> packed_layout(32);
+    for (int i = 0; i < 16; ++i) {
+        packed_layout[i]      = (float) i;
+        packed_layout[i + 16] = (float) (15 - i);
+    }
+
+    const std::vector<std::vector<float>> test_cases = {
+        std::vector<float>(32, -0.75f),
+        packed_layout,
+        { -2.0f, -1.7f, -1.2f, -0.8f, -0.3f, 0.0f, 0.2f, 0.7f,
+           1.1f, 1.6f, 2.0f, -1.5f, 0.5f, -0.1f, 1.3f, -1.0f,
+          -1.9f, -1.4f, -0.9f, -0.4f, 0.1f, 0.4f, 0.9f, 1.4f,
+           1.9f, -1.8f, -1.1f, -0.6f, -0.2f, 0.6f, 1.0f, 1.8f },
+    };
+
+    for (const auto & input : test_cases) {
+        std::vector<uint8_t> quantized(ggml_row_size(GGML_TYPE_Q4_HQQ, input.size()));
+        std::vector<float> output(input.size());
+
+        qfns->from_float_ref(input.data(), quantized.data(), input.size());
+        qfns->to_float(quantized.data(), output.data(), output.size());
+
+        float min = input[0];
+        float max = input[0];
+        for (size_t i = 0; i < input.size(); ++i) {
+            min = input[i] < min ? input[i] : min;
+            max = input[i] > max ? input[i] : max;
+            assert(isfinite(output[i]));
+        }
+
+        const float max_error = (max - min) / 15.0f * 0.6f + 0.002f;
+        for (size_t i = 0; i < input.size(); ++i) {
+            assert(fabsf(output[i] - input[i]) <= max_error);
+        }
+    }
+}
+
 int main(int argc, char * argv[]) {
     bool verbose = false;
     const size_t test_size = 32 * 128;
@@ -124,6 +164,7 @@ int main(int argc, char * argv[]) {
 
     int num_failed = 0;
     bool failed = false;
+    test_q4_hqq_roundtrip();
 
     for (int i = 0; i < GGML_TYPE_COUNT; i++) {
         ggml_type type = (ggml_type) i;
