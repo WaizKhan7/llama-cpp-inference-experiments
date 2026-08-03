@@ -537,6 +537,7 @@ static void llama_model_quantize_impl(const std::string & fname_inp, const std::
     switch (params->ftype) {
         case LLAMA_FTYPE_MOSTLY_Q4_0: default_type = GGML_TYPE_Q4_0; break;
         case LLAMA_FTYPE_MOSTLY_Q4_1: default_type = GGML_TYPE_Q4_1; break;
+        case LLAMA_FTYPE_MOSTLY_Q4_HQQ: default_type = GGML_TYPE_Q4_HQQ; break;
         case LLAMA_FTYPE_MOSTLY_Q5_0: default_type = GGML_TYPE_Q5_0; break;
         case LLAMA_FTYPE_MOSTLY_Q5_1: default_type = GGML_TYPE_Q5_1; break;
         case LLAMA_FTYPE_MOSTLY_Q8_0: default_type = GGML_TYPE_Q8_0; break;
