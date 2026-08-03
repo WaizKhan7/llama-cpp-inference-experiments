@@ -2327,6 +2327,19 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples(mmproj_examples).set_env("LLAMA_ARG_NO_MMPROJ_OFFLOAD"));
     add_opt(common_arg(
+        {"--mmproj-backend"}, "BACKEND",
+        "override the backend device used for the multimodal projector only\n"
+        "does not affect the base model's backend/device selection\n"
+        "use --list-devices to see a list of available devices",
+        [](common_params & params, const std::string & value) {
+            if (!ggml_backend_dev_by_name(value.c_str())) {
+                throw std::invalid_argument(string_format(
+                    "invalid --mmproj-backend device: %s (see --list-devices)", value.c_str()));
+            }
+            params.mmproj_backend = value;
+        }
+    ).set_examples(mmproj_examples).set_env("LLAMA_ARG_MMPROJ_BACKEND"));
+    add_opt(common_arg(
         {"--image", "--audio"}, "FILE",
         "path to an image or audio file. use with multimodal models, can be repeated if you have multiple files\n",
         [](common_params & params, const std::string & value) {

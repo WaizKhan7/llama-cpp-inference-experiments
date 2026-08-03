@@ -2153,6 +2153,7 @@ struct server_context {
         if (!mmproj_path.empty()) {
             mtmd_context_params mparams = mtmd_context_params_default();
             mparams.use_gpu       = params_base.mmproj_use_gpu;
+            mparams.mmproj_backend = params_base.mmproj_backend.empty() ? nullptr : params_base.mmproj_backend.c_str();
             mparams.print_timings = false;
             mparams.n_threads     = params_base.cpuparams.n_threads;
             mparams.verbosity     = params_base.verbosity > 0 ? GGML_LOG_LEVEL_DEBUG : GGML_LOG_LEVEL_INFO;

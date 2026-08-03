@@ -3,6 +3,7 @@
 #include "ggml.h"
 #include <stddef.h>
 #include <stdint.h>
+#include <string>
 
 // !!! Internal header, to be used by mtmd only !!!
 
@@ -25,6 +26,7 @@ enum clip_modality {
 struct clip_context_params {
     bool use_gpu;
     enum ggml_log_level verbosity;
+    std::string backend; // explicit backend device name for the projector; empty = auto
 };
 
 struct clip_init_result {

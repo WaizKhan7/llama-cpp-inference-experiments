@@ -129,6 +129,7 @@ struct mtmd_cli_context {
         const char * clip_path = params.mmproj.path.c_str();
         mtmd_context_params mparams = mtmd_context_params_default();
         mparams.use_gpu = params.mmproj_use_gpu;
+        mparams.mmproj_backend = params.mmproj_backend.empty() ? nullptr : params.mmproj_backend.c_str();
         mparams.print_timings = true;
         mparams.n_threads = params.cpuparams.n_threads;
         mparams.verbosity = params.verbosity > 0 ? GGML_LOG_LEVEL_DEBUG : GGML_LOG_LEVEL_INFO;

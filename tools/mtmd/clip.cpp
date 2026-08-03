@@ -396,7 +396,21 @@ struct clip_ctx {
         if (!backend_cpu) {
             throw std::runtime_error("failed to initialize CPU backend");
         }
-        if (ctx_params.use_gpu) {
+        if (!ctx_params.backend.empty()) {
+            auto * dev = ggml_backend_dev_by_name(ctx_params.backend.c_str());
+            if (dev && ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_CPU) {
+                backend = backend_cpu;
+            } else {
+                backend = ggml_backend_init_by_name(ctx_params.backend.c_str(), nullptr);
+            }
+            if (!backend) {
+                throw std::runtime_error(string_format(
+                    "failed to initialize --mmproj-backend device '%s' (see --list-devices)",
+                    ctx_params.backend.c_str()));
+            }
+            LOG_INF("%s: CLIP backend explicitly set to %s via --mmproj-backend\n",
+                    __func__, ggml_backend_name(backend));
+        } else if (ctx_params.use_gpu) {
             auto backend_name = std::getenv("MTMD_BACKEND_DEVICE");
             if (backend_name != nullptr) {
                 backend = ggml_backend_init_by_name(backend_name, nullptr);
@@ -409,7 +423,7 @@ struct clip_ctx {
             }
         }
 
-        if (backend) {
+        if (backend && backend != backend_cpu) {
             LOG_INF("%s: CLIP using %s backend\n", __func__, ggml_backend_name(backend));
             backend_ptrs.push_back(backend);
             backend_buft.push_back(ggml_backend_get_default_buffer_type(backend));
