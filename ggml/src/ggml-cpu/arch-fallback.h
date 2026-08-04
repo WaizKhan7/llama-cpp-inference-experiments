@@ -10,6 +10,7 @@
 #define quantize_row_q8_K_generic quantize_row_q8_K
 #define ggml_vec_dot_q4_0_q8_0_generic ggml_vec_dot_q4_0_q8_0
 #define ggml_vec_dot_q4_1_q8_1_generic ggml_vec_dot_q4_1_q8_1
+#define ggml_vec_dot_q4_hqq_q8_0_generic ggml_vec_dot_q4_hqq_q8_0
 #define ggml_vec_dot_q5_0_q8_0_generic ggml_vec_dot_q5_0_q8_0
 #define ggml_vec_dot_q5_1_q8_1_generic ggml_vec_dot_q5_1_q8_1
 #define ggml_vec_dot_q8_0_q8_0_generic ggml_vec_dot_q8_0_q8_0
@@ -182,6 +183,7 @@
 #elif defined(__wasm__)
 // quants.c
 #define ggml_vec_dot_q4_1_q8_1_generic ggml_vec_dot_q4_1_q8_1
+#define ggml_vec_dot_q4_hqq_q8_0_generic ggml_vec_dot_q4_hqq_q8_0
 #define ggml_vec_dot_tq1_0_q8_K_generic ggml_vec_dot_tq1_0_q8_K
 #define ggml_vec_dot_tq2_0_q8_K_generic ggml_vec_dot_tq2_0_q8_K
 #define ggml_vec_dot_iq2_xxs_q8_K_generic ggml_vec_dot_iq2_xxs_q8_K
