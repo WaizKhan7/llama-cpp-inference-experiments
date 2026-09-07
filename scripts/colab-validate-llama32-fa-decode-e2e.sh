@@ -77,6 +77,7 @@ env -u GGML_CUDA_LLAMA32_FA_DECODE_ENABLED \
 BUILTIN_STATUS=$?
 
 env GGML_CUDA_LLAMA32_FA_DECODE_ENABLED=1 \
+    GGML_CUDA_LLAMA32_FA_DECODE_TRACE=1 \
     "$CLI" "${COMMON_ARGS[@]}" \
     > "$RESULT_DIR/custom.generated.txt" \
     2> "$RESULT_DIR/custom.stderr.log"
@@ -93,6 +94,13 @@ sha256sum \
     "$RESULT_DIR/custom.generated.txt" \
     > "$RESULT_DIR/generated-text.sha256"
 
+ROUTE_COUNT="$(grep -c '^llama32-fa-decode route: selected$' "$RESULT_DIR/custom.stderr.log" || true)"
+printf '%s\n' "$ROUTE_COUNT" > "$RESULT_DIR/custom-route-count.txt"
+if [[ "$ROUTE_COUNT" -eq 0 ]]; then
+    echo "FAIL: custom process selected the FA-decode route zero times." >&2
+    exit 1
+fi
+
 if ! cmp -s "$RESULT_DIR/builtin.generated.txt" "$RESULT_DIR/custom.generated.txt"; then
     diff -u \
         "$RESULT_DIR/builtin.generated.txt" \
@@ -104,6 +112,7 @@ fi
 
 {
     echo "PASS: built-in and custom generated text is byte-identical."
+    echo "PASS: custom FA-decode route selected $ROUTE_COUNT time(s)."
     echo "Scope: deterministic greedy text comparison only."
     echo "Not yet validated here: generated token IDs, exact prompt token count, or performance."
     echo "Results: $RESULT_DIR"
