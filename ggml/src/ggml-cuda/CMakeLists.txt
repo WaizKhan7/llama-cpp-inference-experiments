@@ -222,6 +222,10 @@ if (CUDAToolkit_FOUND)
             set_target_properties(test-cuda-llama32-fa-decode-ggml-ab PROPERTIES
                 CUDA_STANDARD 17
                 CUDA_STANDARD_REQUIRED ON)
+            # The test instantiates the header-defined custom kernel directly.
+            # Match ggml-cuda's CUDA arithmetic options exactly.
+            target_compile_options(test-cuda-llama32-fa-decode-ggml-ab PRIVATE
+                "$<$<COMPILE_LANGUAGE:CUDA>:${CUDA_FLAGS}>")
             target_include_directories(test-cuda-llama32-fa-decode-ggml-ab PRIVATE
                 tests
                 ..

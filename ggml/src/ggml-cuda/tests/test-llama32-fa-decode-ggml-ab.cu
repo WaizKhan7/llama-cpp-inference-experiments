@@ -2,6 +2,7 @@
 #include <../fattn.cuh>
 #include <../fattn-llama32-fa-decode.cuh>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -20,7 +21,6 @@ constexpr int K_STRIDE = D;
 constexpr int V_STRIDE = D;
 constexpr int O_STRIDE = D;
 constexpr int OUTPUT_GUARD = 32;
-constexpr int PADDED_KV = 256;
 constexpr float SCALE = 0.125f;
 constexpr float SENTINEL = -777.0f;
 
@@ -73,6 +73,92 @@ float random_signed(uint32_t & state) {
     return 2.0f * unit - 1.0f;
 }
 
+enum class input_pattern {
+    random,
+    zeros,
+    dominant_score,
+    gqa_signature,
+};
+
+const char * pattern_name(input_pattern pattern) {
+    switch (pattern) {
+        case input_pattern::random:         return "random";
+        case input_pattern::zeros:          return "zeros";
+        case input_pattern::dominant_score: return "dominant";
+        case input_pattern::gqa_signature:  return "gqa_signature";
+    }
+    return "unknown";
+}
+
+int padded_kv_length(int visible) {
+    return ((visible + 255) / 256) * 256;
+}
+
+void fill_inputs(
+        input_pattern pattern,
+        uint32_t seed,
+        int visible,
+        int padded,
+        std::vector<float> & q,
+        std::vector<half> & k,
+        std::vector<half> & v) {
+    uint32_t state = seed;
+
+    // Deliberately nonzero padding must be ignored by the -infinity mask.
+    for (half & value : k) value = __float2half(8.0f * random_signed(state));
+    for (half & value : v) value = __float2half(8.0f * random_signed(state));
+
+    if (pattern == input_pattern::zeros) {
+        std::fill(q.begin(), q.end(), 0.0f);
+        for (int h = 0; h < HKV; ++h) for (int p = 0; p < visible; ++p)
+            for (int d = 0; d < D; ++d) {
+                k[(h * padded + p) * K_STRIDE + d] = __float2half(0.0f);
+                v[(h * padded + p) * V_STRIDE + d] = __float2half(0.0f);
+            }
+        return;
+    }
+
+    if (pattern == input_pattern::dominant_score) {
+        std::fill(q.begin(), q.end(), 1.0f);
+        for (int h = 0; h < HKV; ++h) for (int p = 0; p < visible; ++p)
+            for (int d = 0; d < D; ++d) {
+                const bool dominant = p == visible - 1;
+                k[(h * padded + p) * K_STRIDE + d] =
+                    __float2half(dominant ? 2.0f : -0.10f);
+                v[(h * padded + p) * V_STRIDE + d] =
+                    __float2half(dominant
+                        ? -0.70f + 0.18f * h + 0.003f * d
+                        : 0.05f * random_signed(state));
+            }
+        return;
+    }
+
+    if (pattern == input_pattern::gqa_signature) {
+        for (int qh = 0; qh < HQ; ++qh) for (int d = 0; d < D; ++d) {
+            q[qh * Q_STRIDE + d] = 0.03f * static_cast<float>(
+                ((qh + 3) * (d + 5)) % 29 - 14);
+        }
+        for (int h = 0; h < HKV; ++h) for (int p = 0; p < visible; ++p)
+            for (int d = 0; d < D; ++d) {
+                k[(h * padded + p) * K_STRIDE + d] =
+                    __float2half(0.02f * static_cast<float>(
+                        ((h + 2) * (p + 1) * (d + 3)) % 31 - 15));
+                v[(h * padded + p) * V_STRIDE + d] =
+                    __float2half(-0.70f + 0.18f * h + 0.002f * d + 0.001f * p);
+            }
+        return;
+    }
+
+    for (float & value : q) value = 1.25f * random_signed(state);
+    for (int h = 0; h < HKV; ++h) for (int p = 0; p < visible; ++p)
+        for (int d = 0; d < D; ++d) {
+            k[(h * padded + p) * K_STRIDE + d] =
+                __float2half(0.50f * random_signed(state));
+            v[(h * padded + p) * V_STRIDE + d] =
+                __float2half(0.75f * random_signed(state));
+        }
+}
+
 struct comparison {
     bool finite = true;
     bool padding_untouched = true;
@@ -86,7 +172,9 @@ std::vector<double> cpu_reference(
         const std::vector<float> & q,
         const std::vector<half> & k,
         const std::vector<half> & v,
-        int visible) {
+        const std::vector<half> & mask,
+        int visible,
+        int padded) {
     std::vector<double> reference(HQ * D);
 
     for (int query_head = 0; query_head < HQ; ++query_head) {
@@ -99,9 +187,10 @@ std::vector<double> cpu_reference(
             for (int dim = 0; dim < D; ++dim) {
                 dot += static_cast<double>(q[query_head * Q_STRIDE + dim]) *
                     static_cast<double>(__half2float(
-                        k[(kv_head * PADDED_KV + pos) * K_STRIDE + dim]));
+                        k[(kv_head * padded + pos) * K_STRIDE + dim]));
             }
-            scores[pos] = dot * static_cast<double>(SCALE);
+            scores[pos] = dot * static_cast<double>(SCALE) +
+                static_cast<double>(__half2float(mask[pos]));
             maximum = std::fmax(maximum, scores[pos]);
         }
 
@@ -115,7 +204,7 @@ std::vector<double> cpu_reference(
             for (int pos = 0; pos < visible; ++pos) {
                 const double weight = std::exp(scores[pos] - maximum);
                 numerator += weight * static_cast<double>(__half2float(
-                    v[(kv_head * PADDED_KV + pos) * V_STRIDE + dim]));
+                    v[(kv_head * padded + pos) * V_STRIDE + dim]));
             }
             reference[query_head * D + dim] = numerator / denominator;
         }
@@ -179,38 +268,20 @@ comparison compare_outputs(
     return result;
 }
 
-bool run_case(ggml_backend_cuda_context & context, int visible, uint32_t seed) {
+bool run_case(
+        ggml_backend_cuda_context & context,
+        int visible,
+        input_pattern pattern,
+        uint32_t seed) {
+    const int padded = padded_kv_length(visible);
     std::vector<float> q(HQ * Q_STRIDE);
-    std::vector<half> k(HKV * PADDED_KV * K_STRIDE);
-    std::vector<half> v(HKV * PADDED_KV * V_STRIDE);
-    std::vector<half> mask(16 * PADDED_KV);
+    std::vector<half> k(HKV * padded * K_STRIDE);
+    std::vector<half> v(HKV * padded * V_STRIDE);
+    std::vector<half> mask(16 * padded);
     std::vector<float> builtin(HQ * O_STRIDE + OUTPUT_GUARD, SENTINEL);
     std::vector<float> custom(HQ * O_STRIDE + OUTPUT_GUARD, SENTINEL);
 
-    uint32_t state = seed;
-    for (float & value : q) {
-        value = 1.25f * random_signed(state);
-    }
-
-    // Padded cache positions contain large nonzero values. Correct masking must
-    // prevent them from affecting either attention result.
-    for (half & value : k) {
-        value = __float2half(8.0f * random_signed(state));
-    }
-    for (half & value : v) {
-        value = __float2half(8.0f * random_signed(state));
-    }
-
-    for (int head = 0; head < HKV; ++head) {
-        for (int pos = 0; pos < visible; ++pos) {
-            for (int dim = 0; dim < D; ++dim) {
-                k[(head * PADDED_KV + pos) * K_STRIDE + dim] =
-                    __float2half(0.50f * random_signed(state));
-                v[(head * PADDED_KV + pos) * V_STRIDE + dim] =
-                    __float2half(0.75f * random_signed(state));
-            }
-        }
-    }
+    fill_inputs(pattern, seed, visible, padded, q, k, v);
 
     const half negative_infinity =
         __float2half(-std::numeric_limits<float>::infinity());
@@ -218,10 +289,10 @@ bool run_case(ggml_backend_cuda_context & context, int visible, uint32_t seed) {
         value = negative_infinity;
     }
     for (int pos = 0; pos < visible; ++pos) {
-        mask[pos] = __float2half(0.0f);
+        mask[pos] = __float2half(pos == visible / 2 ? -0.125f : 0.0f);
     }
 
-    const std::vector<double> reference = cpu_reference(q, k, v, visible);
+    const std::vector<double> reference = cpu_reference(q, k, v, mask, visible, padded);
 
     device_buffer<float> d_q(q.size());
     device_buffer<half> d_k(k.size());
@@ -253,18 +324,18 @@ bool run_case(ggml_backend_cuda_context & context, int visible, uint32_t seed) {
     set_tensor(tq, GGML_TYPE_F32, D, 1, HQ, 1,
                sizeof(float), D * sizeof(float),
                Q_STRIDE * sizeof(float), HQ * Q_STRIDE * sizeof(float));
-    set_tensor(tk, GGML_TYPE_F16, D, PADDED_KV, HKV, 1,
+    set_tensor(tk, GGML_TYPE_F16, D, padded, HKV, 1,
                sizeof(half), K_STRIDE * sizeof(half),
-               PADDED_KV * K_STRIDE * sizeof(half),
-               HKV * PADDED_KV * K_STRIDE * sizeof(half));
-    set_tensor(tv, GGML_TYPE_F16, D, PADDED_KV, HKV, 1,
+               padded * K_STRIDE * sizeof(half),
+               HKV * padded * K_STRIDE * sizeof(half));
+    set_tensor(tv, GGML_TYPE_F16, D, padded, HKV, 1,
                sizeof(half), V_STRIDE * sizeof(half),
-               PADDED_KV * V_STRIDE * sizeof(half),
-               HKV * PADDED_KV * V_STRIDE * sizeof(half));
-    set_tensor(tm, GGML_TYPE_F16, PADDED_KV, 16, 1, 1,
-               sizeof(half), PADDED_KV * sizeof(half),
-               16 * PADDED_KV * sizeof(half),
-               16 * PADDED_KV * sizeof(half));
+               padded * V_STRIDE * sizeof(half),
+               HKV * padded * V_STRIDE * sizeof(half));
+    set_tensor(tm, GGML_TYPE_F16, padded, 16, 1, 1,
+               sizeof(half), padded * sizeof(half),
+               16 * padded * sizeof(half),
+               16 * padded * sizeof(half));
     set_tensor(td_builtin, GGML_TYPE_F32, D, HQ, 1, 1,
                sizeof(float), O_STRIDE * sizeof(float),
                HQ * O_STRIDE * sizeof(float),
@@ -314,12 +385,12 @@ bool run_case(ggml_backend_cuda_context & context, int visible, uint32_t seed) {
         builtin_ref.finite && custom_ref.finite;
 
     std::printf(
-        "visible=%d padded=%d seed=%u "
+        "visible=%d padded=%d pattern=%s seed=%u "
         "builtin_custom_max=%.9g builtin_custom_mean=%.9g "
         "builtin_ref_max=%.9g builtin_ref_mean=%.9g "
         "custom_ref_max=%.9g custom_ref_mean=%.9g "
         "max_head=%d max_dim=%d finite=%d output_guard=%d: %s\n",
-        visible, PADDED_KV, seed,
+        visible, padded, pattern_name(pattern), seed,
         pair.max_abs, pair.sum_abs / count,
         builtin_ref.max_abs, builtin_ref.sum_abs / count,
         custom_ref.max_abs, custom_ref.sum_abs / count,
@@ -351,12 +422,18 @@ int main() {
 
     ggml_backend_cuda_context context(0);
     bool ok = true;
-    for (int visible = 12; visible <= 21; ++visible) {
-        for (uint32_t seed = 1; seed <= 5; ++seed) {
-            ok = run_case(context, visible, seed) && ok;
+
+    // Length 1 is a first-decode smoke test. The remaining contexts are the
+    // compact article sweep shared by correctness and benchmark reporting.
+    for (const int visible : {1, 128, 512, 2048, 4096, 8192}) {
+        for (uint32_t seed = 1; seed <= 3; ++seed) {
+            ok = run_case(context, visible, input_pattern::random, seed) && ok;
         }
+        ok = run_case(context, visible, input_pattern::zeros, 0) && ok;
+        ok = run_case(context, visible, input_pattern::dominant_score, 0) && ok;
+        ok = run_case(context, visible, input_pattern::gqa_signature, 0) && ok;
     }
 
-    std::printf("GGML built-in/custom A/B diagnostics: %s\n", ok ? "PASS" : "FAIL");
+    std::printf("GGML built-in/custom article diagnostics: %s\n", ok ? "PASS" : "FAIL");
     return ok ? 0 : 1;
 }
