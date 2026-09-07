@@ -195,6 +195,21 @@ if (CUDAToolkit_FOUND)
             CUDA_STANDARD 17
             CUDA_STANDARD_REQUIRED ON)
         target_link_libraries(test-cuda-llama32-fa-decode PRIVATE CUDA::cudart)
+
+        if (GGML_CUDA_LLAMA32_FA_DECODE)
+            add_executable(test-cuda-llama32-fa-decode-ggml-boundary
+                tests/test-llama32-fa-decode-ggml-boundary.cu)
+            set_target_properties(test-cuda-llama32-fa-decode-ggml-boundary PROPERTIES
+                CUDA_STANDARD 17
+                CUDA_STANDARD_REQUIRED ON)
+            target_include_directories(test-cuda-llama32-fa-decode-ggml-boundary PRIVATE
+                tests
+                ..
+                ../../include)
+            target_link_libraries(test-cuda-llama32-fa-decode-ggml-boundary PRIVATE
+                ggml-cuda
+                CUDA::cudart)
+        endif()
     endif()
 else()
     message(FATAL_ERROR "CUDA Toolkit not found")

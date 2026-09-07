@@ -42,6 +42,14 @@ static inline bool ggml_cuda_llama32_fa_decode_supported(const ggml_tensor * dst
         return false;
     }
 
+    // The specialized kernel dereferences scalar elements directly. It may
+    // accept padding between rows and heads, but never inside a vector.
+    if (Q->nb[0] != sizeof(float) || K->nb[0] != sizeof(half) ||
+        V->nb[0] != sizeof(half) || mask->nb[0] != sizeof(half) ||
+        dst->nb[0] != sizeof(float)) {
+        return false;
+    }
+
     float max_bias = 0.0f;
     float logit_softcap = 0.0f;
     memcpy(&max_bias,      (const float *) dst->op_params + 1, sizeof(float));
