@@ -15,6 +15,7 @@ struct params {
     std::string model;
     std::string prompt_file;
     int context_tokens = 0;
+    int ctx_size = 0;
     int predict = 50;
     int gpu_layers = 99;
     int warmup = 0;
@@ -32,6 +33,7 @@ static void usage(const char * p) {
     std::fprintf(stderr,
         "Usage: %s --model MODEL.gguf --prompt-file PROMPT.txt [options]\n"
         "  --context-tokens N  exact prompt token count (padding is token-level)\n"
+        "  --ctx-size N        allocated context capacity; independent of prompt length\n"
         "  --predict N         generated greedy tokens; default 50\n"
         "  --gpu-layers N      GPU-offloaded layers; default 99\n"
         "  --warmup N          untimed repeats; default 0\n"
@@ -54,6 +56,7 @@ static bool parse(int argc, char ** argv, params & p) {
         if (std::strcmp(a, "--model") == 0 && ++i < argc) p.model = argv[i];
         else if (std::strcmp(a, "--prompt-file") == 0 && ++i < argc) p.prompt_file = argv[i];
         else if (std::strcmp(a, "--context-tokens") == 0 && ++i < argc) { if (!positive(argv[i], p.context_tokens)) return false; }
+        else if (std::strcmp(a, "--ctx-size") == 0 && ++i < argc) { if (!positive(argv[i], p.ctx_size)) return false; }
         else if (std::strcmp(a, "--predict") == 0 && ++i < argc) { if (!positive(argv[i], p.predict)) return false; }
         else if (std::strcmp(a, "--gpu-layers") == 0 && ++i < argc) { if (!positive(argv[i], p.gpu_layers, true)) return false; }
         else if (std::strcmp(a, "--warmup") == 0 && ++i < argc) { if (!positive(argv[i], p.warmup, true)) return false; }
@@ -175,8 +178,16 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
+    const int minimum_ctx = static_cast<int>(prompt.size()) + p.predict;
+    if (p.ctx_size != 0 && p.ctx_size < minimum_ctx) {
+        std::fprintf(stderr, "Requested context capacity %d is smaller than prompt plus generation (%d).\n", p.ctx_size, minimum_ctx);
+        llama_model_free(model);
+        llama_backend_free();
+        return 2;
+    }
+
     llama_context_params cp = llama_context_default_params();
-    cp.n_ctx = (uint32_t) (prompt.size() + p.predict);
+    cp.n_ctx = static_cast<uint32_t>(p.ctx_size != 0 ? p.ctx_size : minimum_ctx);
     cp.n_batch = (uint32_t) prompt.size();
     cp.n_ubatch = (uint32_t) prompt.size();
     cp.flash_attn_type = p.flash_attn;
@@ -222,6 +233,7 @@ int main(int argc, char ** argv) {
         ? (double) first.decode_steps * timings.size() / (sum / 1000.0) : 0.0;
 
     std::printf("PROMPT_TOKEN_COUNT=%zu\n", prompt.size());
+    std::printf("CONTEXT_CAPACITY=%u\n", cp.n_ctx);
     std::printf("GENERATED_TOKEN_COUNT=%zu\n", first.ids.size());
     std::printf("GENERATED_TOKEN_IDS=");
     for (size_t i = 0; i < first.ids.size(); ++i) {
