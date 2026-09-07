@@ -18,6 +18,8 @@ struct params {
     int ctx_size = 0;
     int predict = 50;
     int gpu_layers = 99;
+    int batch_size = 0;
+    int ubatch_size = 0;
     int warmup = 0;
     int runs = 1;
     llama_flash_attn_type flash_attn = LLAMA_FLASH_ATTN_TYPE_ENABLED;
@@ -36,6 +38,8 @@ static void usage(const char * p) {
         "  --ctx-size N        allocated context capacity; independent of prompt length\n"
         "  --predict N         generated greedy tokens; default 50\n"
         "  --gpu-layers N      GPU-offloaded layers; default 99\n"
+        "  --batch-size N      logical prompt batch size; default: prompt length\n"
+        "  --ubatch-size N     physical prompt batch size; default: prompt length\n"
         "  --warmup N          untimed repeats; default 0\n"
         "  --runs N            timed repeats; default 1\n"
         "  --flash-attn on|off default on\n", p);
@@ -59,6 +63,8 @@ static bool parse(int argc, char ** argv, params & p) {
         else if (std::strcmp(a, "--ctx-size") == 0 && ++i < argc) { if (!positive(argv[i], p.ctx_size)) return false; }
         else if (std::strcmp(a, "--predict") == 0 && ++i < argc) { if (!positive(argv[i], p.predict)) return false; }
         else if (std::strcmp(a, "--gpu-layers") == 0 && ++i < argc) { if (!positive(argv[i], p.gpu_layers, true)) return false; }
+        else if (std::strcmp(a, "--batch-size") == 0 && ++i < argc) { if (!positive(argv[i], p.batch_size)) return false; }
+        else if (std::strcmp(a, "--ubatch-size") == 0 && ++i < argc) { if (!positive(argv[i], p.ubatch_size)) return false; }
         else if (std::strcmp(a, "--warmup") == 0 && ++i < argc) { if (!positive(argv[i], p.warmup, true)) return false; }
         else if (std::strcmp(a, "--runs") == 0 && ++i < argc) { if (!positive(argv[i], p.runs)) return false; }
         else if (std::strcmp(a, "--flash-attn") == 0 && ++i < argc) {
@@ -188,8 +194,8 @@ int main(int argc, char ** argv) {
 
     llama_context_params cp = llama_context_default_params();
     cp.n_ctx = static_cast<uint32_t>(p.ctx_size != 0 ? p.ctx_size : minimum_ctx);
-    cp.n_batch = (uint32_t) prompt.size();
-    cp.n_ubatch = (uint32_t) prompt.size();
+    cp.n_batch = static_cast<uint32_t>(p.batch_size != 0 ? p.batch_size : prompt.size());
+    cp.n_ubatch = static_cast<uint32_t>(p.ubatch_size != 0 ? p.ubatch_size : prompt.size());
     cp.flash_attn_type = p.flash_attn;
     cp.no_perf = true;
     llama_context * ctx = llama_init_from_model(model, cp);
@@ -234,6 +240,8 @@ int main(int argc, char ** argv) {
 
     std::printf("PROMPT_TOKEN_COUNT=%zu\n", prompt.size());
     std::printf("CONTEXT_CAPACITY=%u\n", cp.n_ctx);
+    std::printf("PROMPT_BATCH_SIZE=%u\n", cp.n_batch);
+    std::printf("PROMPT_UBATCH_SIZE=%u\n", cp.n_ubatch);
     std::printf("GENERATED_TOKEN_COUNT=%zu\n", first.ids.size());
     std::printf("GENERATED_TOKEN_IDS=");
     for (size_t i = 0; i < first.ids.size(); ++i) {

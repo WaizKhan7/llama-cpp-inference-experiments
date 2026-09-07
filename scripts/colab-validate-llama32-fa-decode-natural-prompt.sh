@@ -21,12 +21,12 @@ for C; do
 
     env -u GGML_CUDA_LLAMA32_FA_DECODE_ENABLED -u GGML_CUDA_LLAMA32_FA_DECODE_TRACE \
         "$H" --model "$M" --prompt-file "$P" --ctx-size "$C" \
-        --predict "$N" --gpu-layers "$G" --flash-attn on \
+        --predict "$N" --gpu-layers "$G" --batch-size 2048 --ubatch-size 512 --flash-attn on \
         > "$D/builtin.txt" 2> "$D/builtin.stderr"
 
     env GGML_CUDA_LLAMA32_FA_DECODE_ENABLED=1 GGML_CUDA_LLAMA32_FA_DECODE_TRACE=1 \
         "$H" --model "$M" --prompt-file "$P" --ctx-size "$C" \
-        --predict "$N" --gpu-layers "$G" --flash-attn on \
+        --predict "$N" --gpu-layers "$G" --batch-size 2048 --ubatch-size 512 --flash-attn on \
         > "$D/custom.txt" 2> "$D/custom.stderr"
 
     BP=$(sed -n 's/^PROMPT_TOKEN_COUNT=//p' "$D/builtin.txt")
