@@ -15,10 +15,11 @@ namespace {
 constexpr int HQ = 32;
 constexpr int HKV = 8;
 constexpr int D = 64;
-constexpr int Q_STRIDE = 68;
-constexpr int K_STRIDE = 80;
-constexpr int V_STRIDE = 96;
-constexpr int O_STRIDE = 72;
+constexpr int Q_STRIDE = D;
+constexpr int K_STRIDE = D;
+constexpr int V_STRIDE = D;
+constexpr int O_STRIDE = D;
+constexpr int OUTPUT_GUARD = 32;
 constexpr int PADDED_KV = 256;
 constexpr float SCALE = 0.125f;
 constexpr float SENTINEL = -777.0f;
@@ -100,13 +101,13 @@ comparison compare_outputs(
                 result.max_dim = dim;
             }
         }
+    }
 
-        for (int dim = D; dim < O_STRIDE; ++dim) {
-            result.padding_untouched =
-                result.padding_untouched &&
-                builtin[head * O_STRIDE + dim] == SENTINEL &&
-                custom[head * O_STRIDE + dim] == SENTINEL;
-        }
+    for (size_t index = HQ * O_STRIDE; index < builtin.size(); ++index) {
+        result.padding_untouched =
+            result.padding_untouched &&
+            builtin[index] == SENTINEL &&
+            custom[index] == SENTINEL;
     }
 
     return result;
@@ -117,8 +118,8 @@ bool run_case(ggml_backend_cuda_context & context, int visible, uint32_t seed) {
     std::vector<half> k(HKV * PADDED_KV * K_STRIDE);
     std::vector<half> v(HKV * PADDED_KV * V_STRIDE);
     std::vector<half> mask(16 * PADDED_KV);
-    std::vector<float> builtin(HQ * O_STRIDE, SENTINEL);
-    std::vector<float> custom(HQ * O_STRIDE, SENTINEL);
+    std::vector<float> builtin(HQ * O_STRIDE + OUTPUT_GUARD, SENTINEL);
+    std::vector<float> custom(HQ * O_STRIDE + OUTPUT_GUARD, SENTINEL);
 
     uint32_t state = seed;
     for (float & value : q) {
@@ -242,7 +243,7 @@ bool run_case(ggml_backend_cuda_context & context, int visible, uint32_t seed) {
 
     std::printf(
         "visible=%d padded=%d seed=%u max_abs=%.9g mean_abs=%.9g "
-        "max_head=%d max_dim=%d finite=%d padding=%d: %s\n",
+        "max_head=%d max_dim=%d finite=%d output_guard=%d: %s\n",
         visible, PADDED_KV, seed, result.max_abs, mean_abs,
         result.max_head, result.max_dim, result.finite ? 1 : 0,
         result.padding_untouched ? 1 : 0, ok ? "PASS" : "FAIL");
