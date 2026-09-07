@@ -80,6 +80,11 @@ static bool read_text(const std::string & path, std::string & text) {
     std::ifstream f(path, std::ios::binary);
     if (!f) return false;
     text.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+
+    // Match llama-cli --file: remove one final newline before tokenization.
+    if (!text.empty() && text.back() == char(10)) {
+        text.pop_back();
+    }
     return true;
 }
 
