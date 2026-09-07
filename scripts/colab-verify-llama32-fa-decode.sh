@@ -36,9 +36,9 @@ mkdir -p "${RESULT_DIR}"
     c++ --version
 } | tee "${RESULT_DIR}/environment.txt"
 
-cmake     -S "${REPO_DIR}"     -B "${BUILD_DIR}"     -DGGML_CUDA=ON     -DGGML_CUDA_FA=ON     -DGGML_CUDA_LLAMA32_DECODE_TESTS=ON     -DCMAKE_CUDA_ARCHITECTURES=75     -DCMAKE_BUILD_TYPE=Release     -DLLAMA_BUILD_TESTS=OFF     -DLLAMA_BUILD_EXAMPLES=OFF     -DLLAMA_BUILD_TOOLS=OFF     2>&1 | tee "${RESULT_DIR}/configure.log"
+cmake     -S "${REPO_DIR}"     -B "${BUILD_DIR}"     -DGGML_CUDA=ON     -DGGML_CUDA_FA=ON     -DGGML_CUDA_LLAMA32_DECODE_TESTS=ON     -DGGML_CUDA_LLAMA32_FA_DECODE=ON     -DCMAKE_CUDA_ARCHITECTURES=75     -DCMAKE_BUILD_TYPE=Release     -DLLAMA_BUILD_TESTS=OFF     -DLLAMA_BUILD_EXAMPLES=OFF     -DLLAMA_BUILD_TOOLS=OFF     2>&1 | tee "${RESULT_DIR}/configure.log"
 
-cmake     --build "${BUILD_DIR}"     --target test-cuda-llama32-fa-decode     --config Release     -j2     2>&1 | tee "${RESULT_DIR}/build.log"
+cmake     --build "${BUILD_DIR}"     --target ggml-cuda test-cuda-llama32-fa-decode     --config Release     -j2     2>&1 | tee "${RESULT_DIR}/build.log"
 
 if [[ ! -x "${HARNESS}" ]]; then
     echo "Missing expected harness: ${HARNESS}" >&2

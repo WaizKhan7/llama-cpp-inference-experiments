@@ -1,5 +1,8 @@
 #include "common.cuh"
 #include "fattn-common.cuh"
+#ifdef GGML_CUDA_LLAMA32_FA_DECODE
+#include "fattn-llama32-fa-decode.cuh"
+#endif
 #include "fattn-mma-f16.cuh"
 #include "fattn-tile-f16.cuh"
 #include "fattn-tile-f32.cuh"

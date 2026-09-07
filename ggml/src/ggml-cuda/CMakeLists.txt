@@ -178,6 +178,12 @@ if (CUDAToolkit_FOUND)
 
     target_compile_options(ggml-cuda PRIVATE "$<$<COMPILE_LANGUAGE:CUDA>:${CUDA_FLAGS}>")
 
+    # Experimental, un-routed Llama 3.2 FA-decode adapter.
+    option(GGML_CUDA_LLAMA32_FA_DECODE [=[Compile the experimental Llama 3.2 one-token FA-decode adapter]=] OFF)
+    if (GGML_CUDA_LLAMA32_FA_DECODE)
+        add_compile_definitions(GGML_CUDA_LLAMA32_FA_DECODE)
+    endif()
+
     # Optional, standalone correctness and timing harness for the experimental
     # Llama 3.2-1B single-token decode kernel. It is intentionally separate
     # from GGML dispatch until raw CUDA parity has been demonstrated.
