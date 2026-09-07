@@ -214,6 +214,21 @@ if (CUDAToolkit_FOUND)
             target_link_libraries(test-cuda-llama32-fa-decode-ggml-boundary PRIVATE
                 ggml-cuda
                 CUDA::cudart)
+
+            # Diagnostic A/B fixture: run llama.cpp's built-in Flash Attention
+            # and the custom kernel on identical GGML tensors.
+            add_executable(test-cuda-llama32-fa-decode-ggml-ab
+                tests/test-llama32-fa-decode-ggml-ab.cu)
+            set_target_properties(test-cuda-llama32-fa-decode-ggml-ab PROPERTIES
+                CUDA_STANDARD 17
+                CUDA_STANDARD_REQUIRED ON)
+            target_include_directories(test-cuda-llama32-fa-decode-ggml-ab PRIVATE
+                tests
+                ..
+                ../../include)
+            target_link_libraries(test-cuda-llama32-fa-decode-ggml-ab PRIVATE
+                ggml-cuda
+                CUDA::cudart)
         endif()
     endif()
 else()
