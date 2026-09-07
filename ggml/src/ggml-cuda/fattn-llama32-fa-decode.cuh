@@ -1,15 +1,34 @@
 #pragma once
 
+#include <cstdlib>
+#include <cstring>
 #include <math_constants.h>
 
-// This predicate intentionally has no caller yet. It freezes the first
-// llama.cpp integration contract before a new CUDA kernel is routed.
+// This predicate freezes the first llama.cpp integration contract. The
+// dispatcher calls the custom route only after both the runtime opt-in and
+// this predicate accept the operation.
 // The raw parity kernel has different inputs: FP16 Q/K/V and fused RoPE.
 // GGML has FP32 Q/output and pre-rotated Q/K at this operation boundary.
 #ifdef GGML_CUDA_LLAMA32_FA_DECODE
 #ifdef GGML_CUDA_LLAMA32_FA_DECODE_TEST_HOOK
 extern int ggml_cuda_llama32_fa_decode_test_dispatch_count;
 #endif
+
+// Normal builds require an explicit process-level opt-in. This lets one
+// compiled llama.cpp binary provide a faithful built-in baseline and the
+// custom FA-decode path. The focused CUDA fixture bypasses this switch so it
+// can test dispatcher selection without relying on process environment.
+static inline bool ggml_cuda_llama32_fa_decode_enabled() {
+#ifdef GGML_CUDA_LLAMA32_FA_DECODE_TEST_HOOK
+    return true;
+#else
+    static const bool enabled = []() {
+        const char * value = std::getenv("GGML_CUDA_LLAMA32_FA_DECODE_ENABLED");
+        return value != nullptr && std::strcmp(value, "1") == 0;
+    }();
+    return enabled;
+#endif
+}
 
 static inline bool ggml_cuda_llama32_fa_decode_supported(const ggml_tensor * dst) {
     if (!dst || dst->op != GGML_OP_FLASH_ATTN_EXT) {

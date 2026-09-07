@@ -432,7 +432,8 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
     // exact GGML layout validated by the boundary fixture. The predicate is
     // deliberately strict; every unsupported operation uses the unchanged
     // llama.cpp selector below.
-    if (ggml_cuda_llama32_fa_decode_supported(dst)) {
+    if (ggml_cuda_llama32_fa_decode_enabled() &&
+        ggml_cuda_llama32_fa_decode_supported(dst)) {
         ggml_cuda_llama32_fa_decode(ctx, dst);
 #ifdef GGML_CUDA_LLAMA32_FA_DECODE_TEST_HOOK
         ++ggml_cuda_llama32_fa_decode_test_dispatch_count;
