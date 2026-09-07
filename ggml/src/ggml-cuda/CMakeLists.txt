@@ -177,6 +177,19 @@ if (CUDAToolkit_FOUND)
     endif()
 
     target_compile_options(ggml-cuda PRIVATE "$<$<COMPILE_LANGUAGE:CUDA>:${CUDA_FLAGS}>")
+
+    # Optional, standalone correctness and timing harness for the experimental
+    # Llama 3.2-1B single-token decode kernel. It is intentionally separate
+    # from GGML dispatch until raw CUDA parity has been demonstrated.
+    option(GGML_CUDA_LLAMA32_DECODE_TESTS "Build the Llama 3.2 raw decode CUDA harness" OFF)
+    if (GGML_CUDA_LLAMA32_DECODE_TESTS)
+        add_executable(test-cuda-llama32-fa-decode
+            tests/test-llama32-fa-decode.cu)
+        set_target_properties(test-cuda-llama32-fa-decode PROPERTIES
+            CUDA_STANDARD 17
+            CUDA_STANDARD_REQUIRED ON)
+        target_link_libraries(test-cuda-llama32-fa-decode PRIVATE CUDA::cudart)
+    endif()
 else()
     message(FATAL_ERROR "CUDA Toolkit not found")
 endif()
