@@ -37,7 +37,8 @@ bool guard_test() {
 bool case_test(int visible) {
     const int padded=((visible+255)/256)*256;
     std::vector<float> q(HQ*QS), out(HQ*OS,SENTINEL), ref(HQ*D);
-    std::vector<half> k(HKV*padded*KS),v(HKV*padded*VS),m(padded,__float2half(-CUDART_INF_F));
+    const half masked_value = __float2half(-std::numeric_limits<float>::infinity());
+    std::vector<half> k(HKV*padded*KS),v(HKV*padded*VS),m(padded,masked_value);
     for(int h=0;h<HQ;++h) for(int x=0;x<D;++x) q[h*QS+x]=.03f*float((h+3)*(x+5)%29-14);
     for(int h=0;h<HKV;++h) for(int p=0;p<visible;++p) {
         for(int x=0;x<D;++x) {
