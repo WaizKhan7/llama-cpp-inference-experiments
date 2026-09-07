@@ -11,6 +11,10 @@
 #include "fattn-wmma-f16.cuh"
 #include "fattn.cuh"
 
+#ifdef GGML_CUDA_LLAMA32_FA_DECODE_TEST_HOOK
+int ggml_cuda_llama32_fa_decode_test_dispatch_count = 0;
+#endif
+
 template <int DKQ, int DV, int ncols2>
 static void ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
@@ -422,6 +426,21 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
 
 void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     ggml_cuda_set_device(ctx.device);
+
+#ifdef GGML_CUDA_LLAMA32_FA_DECODE
+    // First specialization only: one Llama 3.2-1B decode token with the
+    // exact GGML layout validated by the boundary fixture. The predicate is
+    // deliberately strict; every unsupported operation uses the unchanged
+    // llama.cpp selector below.
+    if (ggml_cuda_llama32_fa_decode_supported(dst)) {
+        ggml_cuda_llama32_fa_decode(ctx, dst);
+#ifdef GGML_CUDA_LLAMA32_FA_DECODE_TEST_HOOK
+        ++ggml_cuda_llama32_fa_decode_test_dispatch_count;
+#endif
+        return;
+    }
+#endif
+
     switch (ggml_cuda_get_best_fattn_kernel(ggml_cuda_get_device(), dst)) {
         case BEST_FATTN_KERNEL_NONE:
             GGML_ABORT("fatal error");

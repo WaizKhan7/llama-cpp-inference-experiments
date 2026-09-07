@@ -1,4 +1,5 @@
 #include <../common.cuh>
+#include <../fattn.cuh>
 #include <../fattn-llama32-fa-decode.cuh>
 #include <cmath>
 #include <cstdio>
@@ -31,6 +32,8 @@ bool guard_test() {
     bool ok=ggml_cuda_llama32_fa_decode_supported(&d);
     q.ne[1]=2; ok=ok && !ggml_cuda_llama32_fa_decode_supported(&d);
     q.ne[1]=1; q.nb[0]=2; ok=ok && !ggml_cuda_llama32_fa_decode_supported(&d);
+    q.nb[0]=4; d.ne[1]=31; ok=ok && !ggml_cuda_llama32_fa_decode_supported(&d);
+    d.ne[1]=32;
     q.nb[0]=4; v.type=GGML_TYPE_F32; ok=ok && !ggml_cuda_llama32_fa_decode_supported(&d);
     std::printf("guard: %s\n",ok?"PASS":"FAIL"); return ok;
 }
@@ -38,7 +41,7 @@ bool case_test(int visible) {
     const int padded=((visible+255)/256)*256;
     std::vector<float> q(HQ*QS), out(HQ*OS,SENTINEL), ref(HQ*D);
     const half masked_value = __float2half(-std::numeric_limits<float>::infinity());
-    std::vector<half> k(HKV*padded*KS),v(HKV*padded*VS),m(padded,masked_value);
+    std::vector<half> k(HKV*padded*KS),v(HKV*padded*VS),m(16*padded,masked_value);
     for(int h=0;h<HQ;++h) for(int x=0;x<D;++x) q[h*QS+x]=.03f*float((h+3)*(x+5)%29-14);
     for(int h=0;h<HKV;++h) for(int p=0;p<visible;++p) {
         for(int x=0;x<D;++x) {
@@ -59,11 +62,27 @@ bool case_test(int visible) {
     check(cudaMemcpy(dv.p,v.data(),v.size()*sizeof(half),cudaMemcpyHostToDevice),"copy V");
     check(cudaMemcpy(dm.p,m.data(),m.size()*sizeof(half),cudaMemcpyHostToDevice),"copy mask");
     check(cudaMemcpy(do_.p,out.data(),out.size()*sizeof(float),cudaMemcpyHostToDevice),"copy output");
-    llama32_fa_decode_ggml_kernel<<<dim3(HQ),dim3(32)>>>(reinterpret_cast<const char *>(dq.p),reinterpret_cast<const char *>(dk.p),reinterpret_cast<const char *>(dv.p),reinterpret_cast<const char *>(dm.p),reinterpret_cast<char *>(do_.p),SCALE,padded,sizeof(float),QS*sizeof(float),sizeof(half),KS*sizeof(half),padded*KS*sizeof(half),sizeof(half),VS*sizeof(half),padded*VS*sizeof(half),sizeof(half),sizeof(float),OS*sizeof(float));
-    check(cudaGetLastError(),"launch"); check(cudaDeviceSynchronize(),"synchronize");
+    ggml_tensor tq, tk, tv, tm, td;
+    tensor(tq, GGML_TYPE_F32, 64, 1, 32, 1, sizeof(float), D*sizeof(float), QS*sizeof(float), HQ*QS*sizeof(float));
+    tensor(tk, GGML_TYPE_F16, 64, padded, 8, 1, sizeof(half), KS*sizeof(half), padded*KS*sizeof(half), 8*padded*KS*sizeof(half));
+    tensor(tv, GGML_TYPE_F16, 64, padded, 8, 1, sizeof(half), VS*sizeof(half), padded*VS*sizeof(half), 8*padded*VS*sizeof(half));
+    tensor(tm, GGML_TYPE_F16, padded, 16, 1, 1, sizeof(half), padded*sizeof(half), 16*padded*sizeof(half), 16*padded*sizeof(half));
+    tensor(td, GGML_TYPE_F32, 64, 32, 1, 1, sizeof(float), OS*sizeof(float), HQ*OS*sizeof(float), HQ*OS*sizeof(float));
+    tq.data=dq.p; tk.data=dk.p; tv.data=dv.p; tm.data=dm.p; td.data=do_.p;
+    td.op=GGML_OP_FLASH_ATTN_EXT;
+    td.src[0]=&tq; td.src[1]=&tk; td.src[2]=&tv; td.src[3]=&tm;
+    std::memcpy(td.op_params, &SCALE, sizeof(SCALE));
+
+    ggml_cuda_llama32_fa_decode_test_dispatch_count=0;
+    ggml_backend_cuda_context context(0);
+    ggml_cuda_flash_attn_ext(context, &td);
+    check(cudaGetLastError(),"dispatcher launch");
+    check(cudaDeviceSynchronize(),"dispatcher synchronize");
     check(cudaMemcpy(out.data(),do_.p,out.size()*sizeof(float),cudaMemcpyDeviceToHost),"copy output back");
     float maxe=0; bool ok=true;
+    ok=ok && ggml_cuda_llama32_fa_decode_test_dispatch_count==1;
     for(int h=0;h<HQ;++h) { for(int x=0;x<D;++x) { float a=out[h*OS+x],e=std::fabs(a-ref[h*D+x]); maxe=std::fmax(maxe,e); ok=ok&&std::isfinite(a)&&e<=1e-4f+1e-4f*std::fabs(ref[h*D+x]); } for(int x=D;x<OS;++x) ok=ok&&out[h*OS+x]==SENTINEL; }
+    std::printf("route_count=%d\n", ggml_cuda_llama32_fa_decode_test_dispatch_count);
     std::printf("visible=%d padded=%d max_abs_error=%.8f: %s\n",visible,padded,maxe,ok?"PASS":"FAIL"); return ok;
 }
 }

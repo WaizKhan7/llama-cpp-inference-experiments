@@ -7,6 +7,10 @@
 // The raw parity kernel has different inputs: FP16 Q/K/V and fused RoPE.
 // GGML has FP32 Q/output and pre-rotated Q/K at this operation boundary.
 #ifdef GGML_CUDA_LLAMA32_FA_DECODE
+#ifdef GGML_CUDA_LLAMA32_FA_DECODE_TEST_HOOK
+extern int ggml_cuda_llama32_fa_decode_test_dispatch_count;
+#endif
+
 static inline bool ggml_cuda_llama32_fa_decode_supported(const ggml_tensor * dst) {
     if (!dst || dst->op != GGML_OP_FLASH_ATTN_EXT) {
         return false;
@@ -33,6 +37,11 @@ static inline bool ggml_cuda_llama32_fa_decode_supported(const ggml_tensor * dst
         K->ne[0] != 64 || K->ne[2] != 8  || K->ne[3] != 1 ||
         V->ne[0] != 64 || V->ne[2] != 8  || V->ne[3] != 1 ||
         K->ne[1] != V->ne[1] || K->ne[1] == 0 || K->ne[1] % 256 != 0) {
+        return false;
+    }
+
+    if (dst->ne[0] != 64 || dst->ne[1] != 32 ||
+        dst->ne[2] != 1  || dst->ne[3] != 1) {
         return false;
     }
 

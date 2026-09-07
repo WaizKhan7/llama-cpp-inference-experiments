@@ -197,6 +197,10 @@ if (CUDAToolkit_FOUND)
         target_link_libraries(test-cuda-llama32-fa-decode PRIVATE CUDA::cudart)
 
         if (GGML_CUDA_LLAMA32_FA_DECODE)
+            # This hook exists only in the CUDA test build. It lets the
+            # boundary fixture prove that the real dispatcher selected the
+            # specialized route.
+            target_compile_definitions(ggml-cuda PRIVATE GGML_CUDA_LLAMA32_FA_DECODE_TEST_HOOK)
             add_executable(test-cuda-llama32-fa-decode-ggml-boundary
                 tests/test-llama32-fa-decode-ggml-boundary.cu)
             set_target_properties(test-cuda-llama32-fa-decode-ggml-boundary PROPERTIES
@@ -206,6 +210,7 @@ if (CUDAToolkit_FOUND)
                 tests
                 ..
                 ../../include)
+            target_compile_definitions(test-cuda-llama32-fa-decode-ggml-boundary PRIVATE GGML_CUDA_LLAMA32_FA_DECODE_TEST_HOOK)
             target_link_libraries(test-cuda-llama32-fa-decode-ggml-boundary PRIVATE
                 ggml-cuda
                 CUDA::cudart)
