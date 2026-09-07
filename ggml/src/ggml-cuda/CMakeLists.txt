@@ -228,6 +228,7 @@ if (CUDAToolkit_FOUND)
                 ../../include)
             target_link_libraries(test-cuda-llama32-fa-decode-ggml-ab PRIVATE
                 ggml-cuda
+                ggml-base
                 CUDA::cudart)
         endif()
     endif()
