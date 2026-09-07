@@ -16,18 +16,18 @@ extern int ggml_cuda_llama32_fa_decode_test_dispatch_count;
 
 // Normal builds require an explicit process-level opt-in. This lets one
 // compiled llama.cpp binary provide a faithful built-in baseline and the
-// custom FA-decode path. The focused CUDA fixture bypasses this switch so it
-// can test dispatcher selection without relying on process environment.
+// custom FA-decode path. The focused CUDA fixture sets this variable itself.
+// Its test hook counts selections only; it must never force the custom route.
 static inline bool ggml_cuda_llama32_fa_decode_enabled() {
-#ifdef GGML_CUDA_LLAMA32_FA_DECODE_TEST_HOOK
-    return true;
-#else
     static const bool enabled = []() {
         const char * value = std::getenv("GGML_CUDA_LLAMA32_FA_DECODE_ENABLED");
         return value != nullptr && std::strcmp(value, "1") == 0;
     }();
     return enabled;
-#endif
+}
+static inline bool ggml_cuda_llama32_fa_decode_trace_enabled() {
+    const char * value = std::getenv("GGML_CUDA_LLAMA32_FA_DECODE_TRACE");
+    return value != nullptr && std::strcmp(value, "1") == 0;
 }
 
 static inline bool ggml_cuda_llama32_fa_decode_supported(const ggml_tensor * dst) {

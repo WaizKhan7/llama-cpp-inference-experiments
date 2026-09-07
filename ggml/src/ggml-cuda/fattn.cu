@@ -11,6 +11,8 @@
 #include "fattn-wmma-f16.cuh"
 #include "fattn.cuh"
 
+#include <cstdio>
+
 #ifdef GGML_CUDA_LLAMA32_FA_DECODE_TEST_HOOK
 int ggml_cuda_llama32_fa_decode_test_dispatch_count = 0;
 #endif
@@ -435,6 +437,9 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
     if (ggml_cuda_llama32_fa_decode_enabled() &&
         ggml_cuda_llama32_fa_decode_supported(dst)) {
         ggml_cuda_llama32_fa_decode(ctx, dst);
+        if (ggml_cuda_llama32_fa_decode_trace_enabled()) {
+            std::fprintf(stderr, "llama32-fa-decode route: selected\n");
+        }
 #ifdef GGML_CUDA_LLAMA32_FA_DECODE_TEST_HOOK
         ++ggml_cuda_llama32_fa_decode_test_dispatch_count;
 #endif

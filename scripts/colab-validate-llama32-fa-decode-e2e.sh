@@ -18,8 +18,16 @@ NEW_TOKENS=$5
 RESULT_DIR=${6:-llama32-fa-e2e-results}
 GPU_LAYERS=${7:-99}
 
-if [[ ! -x "$CLI" || ! -f "$MODEL_GGUF" || ! -f "$PROMPT_FILE" ]]; then
-    echo "Missing CLI, model GGUF, or prompt file." >&2
+if [[ ! -x "$CLI" ]]; then
+    echo "Missing llama-cli executable: $CLI" >&2
+    exit 2
+fi
+if [[ ! -f "$MODEL_GGUF" ]]; then
+    echo "Missing model GGUF: $MODEL_GGUF" >&2
+    exit 2
+fi
+if [[ ! -f "$PROMPT_FILE" ]]; then
+    echo "Missing prompt file: $PROMPT_FILE" >&2
     exit 2
 fi
 if ! [[ "$CONTEXT_SIZE" =~ ^[1-9][0-9]*$ && "$NEW_TOKENS" =~ ^[1-9][0-9]*$ ]]; then

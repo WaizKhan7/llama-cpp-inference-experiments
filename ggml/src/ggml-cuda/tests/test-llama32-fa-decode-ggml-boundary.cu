@@ -87,6 +87,17 @@ bool case_test(int visible) {
 }
 }
 int main() {
+#if defined(_WIN32)
+    if (_putenv_s("GGML_CUDA_LLAMA32_FA_DECODE_ENABLED", "1") != 0) {
+        std::perror("_putenv_s");
+        return 1;
+    }
+#else
+    if (setenv("GGML_CUDA_LLAMA32_FA_DECODE_ENABLED", "1", 1) != 0) {
+        std::perror("setenv");
+        return 1;
+    }
+#endif
     cudaDeviceProp p; check(cudaGetDeviceProperties(&p,0),"get properties"); std::printf("GGML-boundary FA-decode validation on %s\n",p.name);
     bool ok=guard_test(); for(int visible : {1,127,128,129,255,256,257,511}) ok=case_test(visible)&&ok;
     std::printf("GGML-boundary correctness: %s\n",ok?"PASS":"FAIL"); return ok?0:1;
