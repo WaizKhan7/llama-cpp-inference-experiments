@@ -76,11 +76,76 @@ float random_signed(uint32_t & state) {
 struct comparison {
     bool finite = true;
     bool padding_untouched = true;
-    float max_abs = 0.0f;
+    double max_abs = 0.0;
     double sum_abs = 0.0;
     int max_head = -1;
     int max_dim = -1;
 };
+
+std::vector<double> cpu_reference(
+        const std::vector<float> & q,
+        const std::vector<half> & k,
+        const std::vector<half> & v,
+        int visible) {
+    std::vector<double> reference(HQ * D);
+
+    for (int query_head = 0; query_head < HQ; ++query_head) {
+        const int kv_head = query_head / (HQ / HKV);
+        std::vector<double> scores(visible);
+        double maximum = -std::numeric_limits<double>::infinity();
+
+        for (int pos = 0; pos < visible; ++pos) {
+            double dot = 0.0;
+            for (int dim = 0; dim < D; ++dim) {
+                dot += static_cast<double>(q[query_head * Q_STRIDE + dim]) *
+                    static_cast<double>(__half2float(
+                        k[(kv_head * PADDED_KV + pos) * K_STRIDE + dim]));
+            }
+            scores[pos] = dot * static_cast<double>(SCALE);
+            maximum = std::fmax(maximum, scores[pos]);
+        }
+
+        double denominator = 0.0;
+        for (int pos = 0; pos < visible; ++pos) {
+            denominator += std::exp(scores[pos] - maximum);
+        }
+
+        for (int dim = 0; dim < D; ++dim) {
+            double numerator = 0.0;
+            for (int pos = 0; pos < visible; ++pos) {
+                const double weight = std::exp(scores[pos] - maximum);
+                numerator += weight * static_cast<double>(__half2float(
+                    v[(kv_head * PADDED_KV + pos) * V_STRIDE + dim]));
+            }
+            reference[query_head * D + dim] = numerator / denominator;
+        }
+    }
+
+    return reference;
+}
+
+comparison compare_reference(
+        const std::vector<float> & actual,
+        const std::vector<double> & reference) {
+    comparison result;
+
+    for (int head = 0; head < HQ; ++head) {
+        for (int dim = 0; dim < D; ++dim) {
+            const double value = static_cast<double>(actual[head * O_STRIDE + dim]);
+            const double error = std::fabs(value - reference[head * D + dim]);
+            result.finite = result.finite && std::isfinite(value);
+
+            result.sum_abs += error;
+            if (error > result.max_abs) {
+                result.max_abs = error;
+                result.max_head = head;
+                result.max_dim = dim;
+            }
+        }
+    }
+
+    return result;
+}
 
 comparison compare_outputs(
         const std::vector<float> & builtin,
@@ -91,7 +156,8 @@ comparison compare_outputs(
         for (int dim = 0; dim < D; ++dim) {
             const float a = builtin[head * O_STRIDE + dim];
             const float b = custom[head * O_STRIDE + dim];
-            const float error = std::fabs(a - b);
+            const double error = std::fabs(
+                static_cast<double>(a) - static_cast<double>(b));
 
             result.finite = result.finite && std::isfinite(a) && std::isfinite(b);
             result.sum_abs += error;
@@ -154,6 +220,8 @@ bool run_case(ggml_backend_cuda_context & context, int visible, uint32_t seed) {
     for (int pos = 0; pos < visible; ++pos) {
         mask[pos] = __float2half(0.0f);
     }
+
+    const std::vector<double> reference = cpu_reference(q, k, v, visible);
 
     device_buffer<float> d_q(q.size());
     device_buffer<half> d_k(k.size());
@@ -237,16 +305,27 @@ bool run_case(ggml_backend_cuda_context & context, int visible, uint32_t seed) {
                           custom.size() * sizeof(float),
                           cudaMemcpyDeviceToHost), "copy custom output");
 
-    const comparison result = compare_outputs(builtin, custom);
-    const double mean_abs = result.sum_abs / static_cast<double>(HQ * D);
-    const bool ok = result.finite && result.padding_untouched;
+    const comparison pair = compare_outputs(builtin, custom);
+    const comparison builtin_ref = compare_reference(builtin, reference);
+    const comparison custom_ref = compare_reference(custom, reference);
+    const double count = static_cast<double>(HQ * D);
+    const bool ok =
+        pair.finite && pair.padding_untouched &&
+        builtin_ref.finite && custom_ref.finite;
 
     std::printf(
-        "visible=%d padded=%d seed=%u max_abs=%.9g mean_abs=%.9g "
+        "visible=%d padded=%d seed=%u "
+        "builtin_custom_max=%.9g builtin_custom_mean=%.9g "
+        "builtin_ref_max=%.9g builtin_ref_mean=%.9g "
+        "custom_ref_max=%.9g custom_ref_mean=%.9g "
         "max_head=%d max_dim=%d finite=%d output_guard=%d: %s\n",
-        visible, PADDED_KV, seed, result.max_abs, mean_abs,
-        result.max_head, result.max_dim, result.finite ? 1 : 0,
-        result.padding_untouched ? 1 : 0, ok ? "PASS" : "FAIL");
+        visible, PADDED_KV, seed,
+        pair.max_abs, pair.sum_abs / count,
+        builtin_ref.max_abs, builtin_ref.sum_abs / count,
+        custom_ref.max_abs, custom_ref.sum_abs / count,
+        pair.max_head, pair.max_dim,
+        (pair.finite && builtin_ref.finite && custom_ref.finite) ? 1 : 0,
+        pair.padding_untouched ? 1 : 0, ok ? "PASS" : "FAIL");
 
     return ok;
 }
