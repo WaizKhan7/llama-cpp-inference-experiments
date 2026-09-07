@@ -2,6 +2,7 @@
 #include "ggml-backend.h"
 
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -22,11 +23,22 @@ struct params {
     int ubatch_size = 0;
     int warmup = 0;
     int runs = 1;
+    bool trace_logits = false;
     llama_flash_attn_type flash_attn = LLAMA_FLASH_ATTN_TYPE_ENABLED;
+};
+
+struct logit_record {
+    int step = 0;
+    llama_token top1_id = -1;
+    llama_token top2_id = -1;
+    float top1_logit = -std::numeric_limits<float>::infinity();
+    float top2_logit = -std::numeric_limits<float>::infinity();
+    bool finite = true;
 };
 
 struct result {
     std::vector<llama_token> ids;
+    std::vector<logit_record> logits;
     double decode_ms = 0.0;
     int decode_steps = 0;
 };
@@ -42,6 +54,7 @@ static void usage(const char * p) {
         "  --ubatch-size N     physical prompt batch size; default: prompt length\n"
         "  --warmup N          untimed repeats; default 0\n"
         "  --runs N            timed repeats; default 1\n"
+        "  --trace-logits      print raw top-1/top-2 logits for diagnosis\n"
         "  --flash-attn on|off default on\n", p);
 }
 
@@ -67,6 +80,7 @@ static bool parse(int argc, char ** argv, params & p) {
         else if (std::strcmp(a, "--ubatch-size") == 0 && ++i < argc) { if (!positive(argv[i], p.ubatch_size)) return false; }
         else if (std::strcmp(a, "--warmup") == 0 && ++i < argc) { if (!positive(argv[i], p.warmup, true)) return false; }
         else if (std::strcmp(a, "--runs") == 0 && ++i < argc) { if (!positive(argv[i], p.runs)) return false; }
+        else if (std::strcmp(a, "--trace-logits") == 0) p.trace_logits = true;
         else if (std::strcmp(a, "--flash-attn") == 0 && ++i < argc) {
             if (std::strcmp(argv[i], "on") == 0) p.flash_attn = LLAMA_FLASH_ATTN_TYPE_ENABLED;
             else if (std::strcmp(argv[i], "off") == 0) p.flash_attn = LLAMA_FLASH_ATTN_TYPE_DISABLED;
@@ -114,9 +128,36 @@ static bool exact_prompt(const llama_vocab * vocab, const std::string & text,
     return true;
 }
 
+static bool record_logits(llama_context * ctx, const llama_vocab * vocab,
+                          int step, result & out) {
+    const float * values = llama_get_logits_ith(ctx, -1);
+    if (!values) return false;
+
+    logit_record record;
+    record.step = step;
+    const int32_t n_vocab = llama_vocab_n_tokens(vocab);
+
+    for (int32_t id = 0; id < n_vocab; ++id) {
+        const float value = values[id];
+        record.finite = record.finite && std::isfinite(value);
+        if (value > record.top1_logit) {
+            record.top2_logit = record.top1_logit;
+            record.top2_id = record.top1_id;
+            record.top1_logit = value;
+            record.top1_id = id;
+        } else if (value > record.top2_logit) {
+            record.top2_logit = value;
+            record.top2_id = id;
+        }
+    }
+
+    out.logits.push_back(record);
+    return record.top1_id >= 0 && record.top2_id >= 0;
+}
+
 static bool generate(llama_context * ctx, const llama_vocab * vocab,
                      const std::vector<llama_token> & prompt, int n_predict,
-                     bool timed, result & out) {
+                     bool trace_logits, bool timed, result & out) {
     llama_memory_clear(llama_get_memory(ctx), false);
     llama_sampler * sampler = llama_sampler_init_greedy();
     if (!sampler) return false;
@@ -124,6 +165,10 @@ static bool generate(llama_context * ctx, const llama_vocab * vocab,
     llama_batch batch = llama_batch_get_one(
         const_cast<llama_token *>(prompt.data()), (int32_t) prompt.size());
     if (llama_decode(ctx, batch) != 0) {
+        llama_sampler_free(sampler);
+        return false;
+    }
+    if (trace_logits && !record_logits(ctx, vocab, 0, out)) {
         llama_sampler_free(sampler);
         return false;
     }
@@ -142,6 +187,11 @@ static bool generate(llama_context * ctx, const llama_vocab * vocab,
             return false;
         }
         ++out.decode_steps;
+        if (trace_logits && !record_logits(
+                ctx, vocab, static_cast<int>(out.ids.size()), out)) {
+            llama_sampler_free(sampler);
+            return false;
+        }
         token = llama_sampler_sample(sampler, ctx, -1);
         if (llama_vocab_is_eog(vocab, token)) break;
         out.ids.push_back(token);
@@ -213,7 +263,7 @@ int main(int argc, char ** argv) {
 
     for (int i = 0; i < p.warmup; ++i) {
         result warm;
-        if (!generate(ctx, vocab, prompt, p.predict, false, warm)) {
+        if (!generate(ctx, vocab, prompt, p.predict, p.trace_logits, false, warm)) {
             std::fprintf(stderr, "Warmup failed.\n");
             llama_free(ctx); llama_model_free(model); llama_backend_free();
             return 1;
@@ -224,7 +274,7 @@ int main(int argc, char ** argv) {
     std::vector<double> timings;
     for (int i = 0; i < p.runs; ++i) {
         result current;
-        if (!generate(ctx, vocab, prompt, p.predict, true, current)) {
+        if (!generate(ctx, vocab, prompt, p.predict, p.trace_logits, true, current)) {
             std::fprintf(stderr, "Generation failed.\n");
             llama_free(ctx); llama_model_free(model); llama_backend_free();
             return 1;
@@ -252,7 +302,17 @@ int main(int argc, char ** argv) {
     for (size_t i = 0; i < first.ids.size(); ++i) {
         std::printf("%s%d", i ? "," : "", first.ids[i]);
     }
-    std::printf("\nTIMED_DECODE_STEPS=%d\nTIMED_RUNS=%d\n", first.decode_steps, p.runs);
+    std::printf("\n");
+    for (const logit_record & record : first.logits) {
+        std::printf(
+            "LOGIT_STEP=%d,TOP1_ID=%d,TOP1_LOGIT=%.9g,"
+            "TOP2_ID=%d,TOP2_LOGIT=%.9g,MARGIN=%.9g,FINITE=%d\n",
+            record.step, record.top1_id, record.top1_logit,
+            record.top2_id, record.top2_logit,
+            record.top1_logit - record.top2_logit,
+            record.finite ? 1 : 0);
+    }
+    std::printf("TIMED_DECODE_STEPS=%d\nTIMED_RUNS=%d\n", first.decode_steps, p.runs);
     std::printf("DECODE_MEAN_MS=%.6f\nDECODE_TOKENS_PER_SECOND=%.6f\n", mean, tps);
 
     llama_free(ctx);
