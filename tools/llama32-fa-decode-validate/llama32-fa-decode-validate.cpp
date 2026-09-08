@@ -1,6 +1,7 @@
 #include "llama.h"
 #include "ggml-backend.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -48,6 +49,8 @@ struct result {
     double negative_log_likelihood = 0.0;
     int scored_tokens = 0;
     bool scoring_finite = true;
+    bool logits_finite = true;
+    bool stopped_on_eog = false;
 };
 
 static void usage(const char * p) {
@@ -187,8 +190,27 @@ static bool record_logits(llama_context * ctx, const llama_vocab * vocab,
         }
     }
 
+    out.logits_finite = out.logits_finite && record.finite;
     out.logits.push_back(record);
     return record.top1_id >= 0 && record.top2_id >= 0;
+}
+
+static std::string detokenize_tokens(
+        const llama_vocab * vocab, const std::vector<llama_token> & tokens) {
+    if (tokens.empty()) return {};
+    std::string text(std::max<size_t>(tokens.size(), 1), char(0));
+    int32_t n_chars = llama_detokenize(
+        vocab, tokens.data(), static_cast<int32_t>(tokens.size()),
+        text.data(), static_cast<int32_t>(text.size()), false, false);
+    if (n_chars < 0) {
+        text.resize(static_cast<size_t>(-n_chars));
+        n_chars = llama_detokenize(
+            vocab, tokens.data(), static_cast<int32_t>(tokens.size()),
+            text.data(), static_cast<int32_t>(text.size()), false, false);
+    }
+    if (n_chars < 0) return {};
+    text.resize(static_cast<size_t>(n_chars));
+    return text;
 }
 
 static bool score_target_token(
@@ -267,12 +289,14 @@ static bool generate(llama_context * ctx, const llama_vocab * vocab,
         }
     } else {
         llama_token token = llama_sampler_sample(sampler, ctx, -1);
-        if (!llama_vocab_is_eog(vocab, token)) {
+        if (llama_vocab_is_eog(vocab, token)) {
+            out.stopped_on_eog = true;
+        } else {
             out.ids.push_back(token);
             llama_sampler_accept(sampler, token);
             batch = llama_batch_get_one(&token, 1);
         }
-        while ((int) out.ids.size() < n_predict) {
+        while (!out.stopped_on_eog && (int) out.ids.size() < n_predict) {
             if (llama_decode(ctx, batch) != 0) {
                 llama_sampler_free(sampler);
                 return false;
@@ -284,7 +308,10 @@ static bool generate(llama_context * ctx, const llama_vocab * vocab,
                 return false;
             }
             token = llama_sampler_sample(sampler, ctx, -1);
-            if (llama_vocab_is_eog(vocab, token)) break;
+            if (llama_vocab_is_eog(vocab, token)) {
+                out.stopped_on_eog = true;
+                break;
+            }
             out.ids.push_back(token);
             llama_sampler_accept(sampler, token);
             batch = llama_batch_get_one(&token, 1);
@@ -424,9 +451,15 @@ int main(int argc, char ** argv) {
             llama_free(ctx); llama_model_free(model); llama_backend_free();
             return 1;
         }
+        if (p.trace_logits && !current.logits_finite) {
+            std::fprintf(stderr, "Non-finite logit encountered during a repeated run.\n");
+            llama_free(ctx); llama_model_free(model); llama_backend_free();
+            return 1;
+        }
         if (i == 0) first = current;
-        else if (current.ids != first.ids) {
-            std::fprintf(stderr, "Greedy token IDs changed between runs.\n");
+        else if (current.ids != first.ids ||
+                   current.stopped_on_eog != first.stopped_on_eog) {
+            std::fprintf(stderr, "Greedy output or stop reason changed between runs.\n");
             llama_free(ctx); llama_model_free(model); llama_backend_free();
             return 1;
         }
@@ -443,11 +476,22 @@ int main(int argc, char ** argv) {
     std::printf("PROMPT_BATCH_SIZE=%u\n", cp.n_batch);
     std::printf("PROMPT_UBATCH_SIZE=%u\n", cp.n_ubatch);
     std::printf("GENERATED_TOKEN_COUNT=%zu\n", first.ids.size());
+    std::printf("STOP_REASON=%s\n", teacher_tokens.empty()
+        ? (first.stopped_on_eog ? "eog" : "max_tokens")
+        : "teacher_forced");
+    std::printf("LOGIT_TRACE_ENABLED=%d\n", p.trace_logits ? 1 : 0);
+    std::printf("LOGITS_FINITE=%d\n", first.logits_finite ? 1 : 0);
+    std::printf("INTRA_IMPLEMENTATION_DETERMINISTIC=%d\n", p.runs > 1 ? 1 : 0);
     std::printf("GENERATED_TOKEN_IDS=");
     for (size_t i = 0; i < first.ids.size(); ++i) {
         std::printf("%s%d", i ? "," : "", first.ids[i]);
     }
     std::printf("\n");
+    const std::string generated_text = detokenize_tokens(vocab, first.ids);
+    std::printf("GENERATED_TEXT_BEGIN\n");
+    std::fwrite(generated_text.data(), 1, generated_text.size(), stdout);
+    if (generated_text.empty() || generated_text.back() != '\n') std::printf("\n");
+    std::printf("GENERATED_TEXT_END\n");
     for (const logit_record & record : first.logits) {
         std::printf(
             "LOGIT_STEP=%d,TOP1_ID=%d,TOP1_LOGIT=%.9g,"
@@ -472,7 +516,11 @@ int main(int argc, char ** argv) {
     llama_free(ctx);
     llama_model_free(model);
     llama_backend_free();
-    return first.ids.size() == static_cast<size_t>(sequence_tokens) &&
+    const bool generation_complete = teacher_tokens.empty()
+        ? (first.stopped_on_eog ||
+           first.ids.size() == static_cast<size_t>(sequence_tokens))
+        : first.ids.size() == static_cast<size_t>(sequence_tokens);
+    return generation_complete &&
         (!scoring_mode || first.scored_tokens == sequence_tokens && first.scoring_finite)
         ? 0 : 3;
 }
