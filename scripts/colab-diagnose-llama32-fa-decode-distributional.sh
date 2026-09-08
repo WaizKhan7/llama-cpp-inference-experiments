@@ -2,19 +2,21 @@
 set -euo pipefail
 
 # Compare built-in and custom top-2 distributions on an identical,
-# teacher-forced decode history.
+# teacher-forced decode history at an exact tokenized prompt length.
 [[ $# -eq 7 ]] || {
-    echo "Usage: $0 HARNESS MODEL_GGUF PROMPT_FILE CONTEXT_CAPACITY NEW_TOKENS GPU_LAYERS RESULT_DIR" >&2
+    echo "Usage: $0 HARNESS MODEL_GGUF PROMPT_FILE PROMPT_TOKENS NEW_TOKENS GPU_LAYERS RESULT_DIR" >&2
     exit 2
 }
 
 H=$1
 M=$2
 P=$3
-C=$4
+PROMPT_TOKENS=$4
 N=$5
 G=$6
 O=$7
+CTX_SIZE=$((PROMPT_TOKENS + N))
+BATCH_SIZE=$((PROMPT_TOKENS > 2048 ? PROMPT_TOKENS : 2048))
 
 [[ -x "$H" && -f "$M" && -f "$P" ]] || {
     echo "Missing harness, model, or prompt file." >&2
@@ -23,9 +25,16 @@ O=$7
 mkdir -p "$O"
 
 env -u GGML_CUDA_LLAMA32_FA_DECODE_ENABLED -u GGML_CUDA_LLAMA32_FA_DECODE_TRACE \
-    "$H" --model "$M" --prompt-file "$P" --ctx-size "$C" --predict "$N" \
-    --gpu-layers "$G" --batch-size 2048 --ubatch-size 512 --flash-attn on \
+    "$H" --model "$M" --prompt-file "$P" \
+    --context-tokens "$PROMPT_TOKENS" --ctx-size "$CTX_SIZE" --predict "$N" \
+    --gpu-layers "$G" --batch-size "$BATCH_SIZE" --ubatch-size 512 --flash-attn on \
     --trace-logits > "$O/builtin.txt" 2> "$O/builtin.stderr"
+
+BUILTIN_PROMPT_TOKENS=$(sed -n 's/^PROMPT_TOKEN_COUNT=//p' "$O/builtin.txt")
+[[ "$BUILTIN_PROMPT_TOKENS" == "$PROMPT_TOKENS" ]] || {
+    echo "Built-in prompt length does not match requested token length." >&2
+    exit 1
+}
 
 TEACHER_IDS=$(sed -n 's/^GENERATED_TOKEN_IDS=//p' "$O/builtin.txt")
 [[ -n "$TEACHER_IDS" ]] || {
@@ -34,10 +43,17 @@ TEACHER_IDS=$(sed -n 's/^GENERATED_TOKEN_IDS=//p' "$O/builtin.txt")
 }
 
 env GGML_CUDA_LLAMA32_FA_DECODE_ENABLED=1 GGML_CUDA_LLAMA32_FA_DECODE_TRACE=1 \
-    "$H" --model "$M" --prompt-file "$P" --ctx-size "$C" --predict "$N" \
-    --gpu-layers "$G" --batch-size 2048 --ubatch-size 512 --flash-attn on \
+    "$H" --model "$M" --prompt-file "$P" \
+    --context-tokens "$PROMPT_TOKENS" --ctx-size "$CTX_SIZE" --predict "$N" \
+    --gpu-layers "$G" --batch-size "$BATCH_SIZE" --ubatch-size 512 --flash-attn on \
     --trace-logits --teacher-token-ids "$TEACHER_IDS" \
     > "$O/custom-teacher-forced.txt" 2> "$O/custom-teacher-forced.stderr"
+
+CUSTOM_PROMPT_TOKENS=$(sed -n 's/^PROMPT_TOKEN_COUNT=//p' "$O/custom-teacher-forced.txt")
+[[ "$CUSTOM_PROMPT_TOKENS" == "$PROMPT_TOKENS" ]] || {
+    echo "Custom prompt length does not match requested token length." >&2
+    exit 1
+}
 
 RC=$(grep -c '^llama32-fa-decode route: selected$' "$O/custom-teacher-forced.stderr" || true)
 [[ "$RC" -gt 0 ]] || {
