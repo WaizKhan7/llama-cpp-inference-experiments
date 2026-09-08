@@ -27,6 +27,7 @@ struct params {
     std::string teacher_token_ids;
     int score_prefill_tokens = 0;
     int score_tokens = 0;
+    int score_start_token = 0;
     llama_flash_attn_type flash_attn = LLAMA_FLASH_ATTN_TYPE_ENABLED;
 };
 
@@ -64,6 +65,7 @@ static void usage(const char * p) {
         "  --teacher-token-ids CSV  force this comma-separated token history\n"
         "  --score-prefill-tokens N  held-out tokens used for prefill\n"
         "  --score-tokens N   held-out tokens scored one at a time\n"
+        "  --score-start-token N  held-out token index of the first scored token\n"
         "  --flash-attn on|off default on\n", p);
 }
 
@@ -93,6 +95,7 @@ static bool parse(int argc, char ** argv, params & p) {
         else if (std::strcmp(a, "--teacher-token-ids") == 0 && ++i < argc) p.teacher_token_ids = argv[i];
         else if (std::strcmp(a, "--score-prefill-tokens") == 0 && ++i < argc) { if (!positive(argv[i], p.score_prefill_tokens)) return false; }
         else if (std::strcmp(a, "--score-tokens") == 0 && ++i < argc) { if (!positive(argv[i], p.score_tokens)) return false; }
+        else if (std::strcmp(a, "--score-start-token") == 0 && ++i < argc) { if (!positive(argv[i], p.score_start_token)) return false; }
         else if (std::strcmp(a, "--flash-attn") == 0 && ++i < argc) {
             if (std::strcmp(argv[i], "on") == 0) p.flash_attn = LLAMA_FLASH_ATTN_TYPE_ENABLED;
             else if (std::strcmp(argv[i], "off") == 0) p.flash_attn = LLAMA_FLASH_ATTN_TYPE_DISABLED;
@@ -320,12 +323,14 @@ int main(int argc, char ** argv) {
 
     const llama_vocab * vocab = llama_model_get_vocab(model);
     const bool scoring_mode =
-        p.score_prefill_tokens != 0 || p.score_tokens != 0;
+        p.score_prefill_tokens != 0 || p.score_tokens != 0 ||
+        p.score_start_token != 0;
     if (scoring_mode &&
         (p.score_prefill_tokens == 0 || p.score_tokens == 0 ||
-         p.context_tokens != 0 || !p.teacher_token_ids.empty())) {
+         p.score_start_token == 0 || p.context_tokens != 0 ||
+         !p.teacher_token_ids.empty())) {
         std::fprintf(stderr,
-            "Scoring mode requires both score lengths and no prompt padding or teacher IDs.\n");
+            "Scoring mode requires prefill length, score length, score start, and no prompt padding or teacher IDs.\n");
         llama_model_free(model);
         llama_backend_free();
         return 2;
@@ -338,19 +343,21 @@ int main(int argc, char ** argv) {
     if (scoring_mode) {
         std::vector<llama_token> heldout_tokens;
         if (!tokenize(vocab, prompt_text, true, heldout_tokens) ||
+            p.score_start_token < p.score_prefill_tokens ||
             static_cast<int>(heldout_tokens.size()) <
-                p.score_prefill_tokens + p.score_tokens) {
-            std::fprintf(stderr, "Held-out text has too few tokens for scoring.\n");
+                p.score_start_token + p.score_tokens) {
+            std::fprintf(stderr,
+                "Held-out text or score start cannot supply the requested scoring window.\n");
             llama_model_free(model);
             llama_backend_free();
             return 2;
         }
         prompt.assign(
-            heldout_tokens.begin(),
-            heldout_tokens.begin() + p.score_prefill_tokens);
+            heldout_tokens.begin() + p.score_start_token - p.score_prefill_tokens,
+            heldout_tokens.begin() + p.score_start_token);
         teacher_tokens.assign(
-            heldout_tokens.begin() + p.score_prefill_tokens,
-            heldout_tokens.begin() + p.score_prefill_tokens + p.score_tokens);
+            heldout_tokens.begin() + p.score_start_token,
+            heldout_tokens.begin() + p.score_start_token + p.score_tokens);
         sequence_tokens = p.score_tokens;
     } else {
         if (!exact_prompt(vocab, prompt_text, p.context_tokens, prompt)) {
@@ -451,6 +458,7 @@ int main(int argc, char ** argv) {
             record.finite ? 1 : 0);
     }
     if (scoring_mode) {
+        std::printf("SCORE_START_TOKEN=%d\n", p.score_start_token);
         const double mean_nll = first.negative_log_likelihood / first.scored_tokens;
         std::printf("SCORED_TOKEN_COUNT=%d\n", first.scored_tokens);
         std::printf("NEGATIVE_LOG_LIKELIHOOD=%.12g\n", first.negative_log_likelihood);
