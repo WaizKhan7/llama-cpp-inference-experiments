@@ -28,7 +28,7 @@ ROUTES="$(grep -c "^llama32-fa-decode route: selected$" "$O/custom.stderr" || tr
 {
   echo "| implementation | prompt tokens | deterministic (3x) | stop reason | generated tokens | finite logits | custom routes |"
   echo "| --- | ---: | --- | --- | ---: | --- | ---: |"
-  echo "| builtin | $(sed -n 's/^PROMPT_TOKEN_COUNT=//p' "$O/builtin.txt") | PASS | $(sed -n 's/^STOP_REASON=//p' "$O/builtin.txt") | $(sed -n 's/^GENERATED_TOKEN_COUNT=//p' "$O/builtin.txt") | PASS | 0 |"
+  echo "| builtin | $(sed -n 's/^PROMPT_TOKEN_COUNT=//p' "$O/builtin.txt") | PASS | $(sed -n 's/^STOP_REASON=//p' "$O/builtin.txt") | $(sed -n 's/^GENERATED_TOKEN_COUNT=//p' "$O/builtin.txt") | PASS | disabled |"
   echo "| custom | $(sed -n 's/^PROMPT_TOKEN_COUNT=//p' "$O/custom.txt") | PASS | $(sed -n 's/^STOP_REASON=//p' "$O/custom.txt") | $(sed -n 's/^GENERATED_TOKEN_COUNT=//p' "$O/custom.txt") | PASS | $ROUTES |"
   cmp -s "$O/builtin.generated.txt" "$O/custom.generated.txt" && echo "cross_implementation_text_equal=1" || echo "cross_implementation_text_equal=0"
 } | tee "$O/summary.md"
