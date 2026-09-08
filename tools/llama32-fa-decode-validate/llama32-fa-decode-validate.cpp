@@ -25,6 +25,8 @@ struct params {
     int runs = 1;
     bool trace_logits = false;
     std::string teacher_token_ids;
+    int score_prefill_tokens = 0;
+    int score_tokens = 0;
     llama_flash_attn_type flash_attn = LLAMA_FLASH_ATTN_TYPE_ENABLED;
 };
 
@@ -42,6 +44,9 @@ struct result {
     std::vector<logit_record> logits;
     double decode_ms = 0.0;
     int decode_steps = 0;
+    double negative_log_likelihood = 0.0;
+    int scored_tokens = 0;
+    bool scoring_finite = true;
 };
 
 static void usage(const char * p) {
@@ -57,6 +62,8 @@ static void usage(const char * p) {
         "  --runs N            timed repeats; default 1\n"
         "  --trace-logits      print raw top-1/top-2 logits for diagnosis\n"
         "  --teacher-token-ids CSV  force this comma-separated token history\n"
+        "  --score-prefill-tokens N  held-out tokens used for prefill\n"
+        "  --score-tokens N   held-out tokens scored one at a time\n"
         "  --flash-attn on|off default on\n", p);
 }
 
@@ -84,6 +91,8 @@ static bool parse(int argc, char ** argv, params & p) {
         else if (std::strcmp(a, "--runs") == 0 && ++i < argc) { if (!positive(argv[i], p.runs)) return false; }
         else if (std::strcmp(a, "--trace-logits") == 0) p.trace_logits = true;
         else if (std::strcmp(a, "--teacher-token-ids") == 0 && ++i < argc) p.teacher_token_ids = argv[i];
+        else if (std::strcmp(a, "--score-prefill-tokens") == 0 && ++i < argc) { if (!positive(argv[i], p.score_prefill_tokens)) return false; }
+        else if (std::strcmp(a, "--score-tokens") == 0 && ++i < argc) { if (!positive(argv[i], p.score_tokens)) return false; }
         else if (std::strcmp(a, "--flash-attn") == 0 && ++i < argc) {
             if (std::strcmp(argv[i], "on") == 0) p.flash_attn = LLAMA_FLASH_ATTN_TYPE_ENABLED;
             else if (std::strcmp(argv[i], "off") == 0) p.flash_attn = LLAMA_FLASH_ATTN_TYPE_DISABLED;
@@ -179,10 +188,42 @@ static bool record_logits(llama_context * ctx, const llama_vocab * vocab,
     return record.top1_id >= 0 && record.top2_id >= 0;
 }
 
+static bool score_target_token(
+        llama_context * ctx, const llama_vocab * vocab, llama_token target,
+        result & out) {
+    const float * logits = llama_get_logits_ith(ctx, -1);
+    const int32_t n_vocab = llama_vocab_n_tokens(vocab);
+    if (!logits || target < 0 || target >= n_vocab) return false;
+
+    double maximum = -std::numeric_limits<double>::infinity();
+    for (int32_t id = 0; id < n_vocab; ++id) {
+        const double value = static_cast<double>(logits[id]);
+        if (!std::isfinite(value)) {
+            out.scoring_finite = false;
+            return false;
+        }
+        maximum = std::fmax(maximum, value);
+    }
+
+    double denominator = 0.0;
+    for (int32_t id = 0; id < n_vocab; ++id) {
+        denominator += std::exp(static_cast<double>(logits[id]) - maximum);
+    }
+    if (!std::isfinite(denominator) || denominator <= 0.0) {
+        out.scoring_finite = false;
+        return false;
+    }
+
+    out.negative_log_likelihood +=
+        maximum + std::log(denominator) - static_cast<double>(logits[target]);
+    ++out.scored_tokens;
+    return std::isfinite(out.negative_log_likelihood);
+}
+
 static bool generate(llama_context * ctx, const llama_vocab * vocab,
                      const std::vector<llama_token> & prompt, int n_predict,
                      bool trace_logits, const std::vector<llama_token> * teacher_tokens,
-                     bool timed, result & out) {
+                     bool score_teacher_tokens, bool timed, result & out) {
     llama_memory_clear(llama_get_memory(ctx), false);
     llama_sampler * sampler = teacher_tokens == nullptr
         ? llama_sampler_init_greedy() : nullptr;
@@ -198,6 +239,12 @@ static bool generate(llama_context * ctx, const llama_vocab * vocab,
         if (sampler) llama_sampler_free(sampler);
         return false;
     }
+    if (score_teacher_tokens &&
+        (teacher_tokens == nullptr || teacher_tokens->empty() ||
+         !score_target_token(ctx, vocab, (*teacher_tokens)[0], out))) {
+        if (sampler) llama_sampler_free(sampler);
+        return false;
+    }
 
     const auto start = std::chrono::steady_clock::now();
     if (teacher_tokens != nullptr) {
@@ -208,6 +255,10 @@ static bool generate(llama_context * ctx, const llama_vocab * vocab,
             batch = llama_batch_get_one(&token, 1);
             if (llama_decode(ctx, batch) != 0) return false;
             ++out.decode_steps;
+            if (score_teacher_tokens &&
+                !score_target_token(ctx, vocab, (*teacher_tokens)[step + 1], out)) {
+                return false;
+            }
             if (trace_logits && !record_logits(
                     ctx, vocab, static_cast<int>(step + 1), out)) return false;
         }
@@ -268,28 +319,61 @@ int main(int argc, char ** argv) {
     }
 
     const llama_vocab * vocab = llama_model_get_vocab(model);
+    const bool scoring_mode =
+        p.score_prefill_tokens != 0 || p.score_tokens != 0;
+    if (scoring_mode &&
+        (p.score_prefill_tokens == 0 || p.score_tokens == 0 ||
+         p.context_tokens != 0 || !p.teacher_token_ids.empty())) {
+        std::fprintf(stderr,
+            "Scoring mode requires both score lengths and no prompt padding or teacher IDs.\n");
+        llama_model_free(model);
+        llama_backend_free();
+        return 2;
+    }
+
     std::vector<llama_token> prompt;
-    if (!exact_prompt(vocab, prompt_text, p.context_tokens, prompt)) {
-        llama_model_free(model);
-        llama_backend_free();
-        return 1;
-    }
-
     std::vector<llama_token> teacher_tokens;
-    if (!parse_teacher_token_ids(p.teacher_token_ids, vocab, teacher_tokens)) {
-        std::fprintf(stderr, "Invalid --teacher-token-ids value.\n");
-        llama_model_free(model);
-        llama_backend_free();
-        return 2;
-    }
-    if (!teacher_tokens.empty() && static_cast<int>(teacher_tokens.size()) != p.predict) {
-        std::fprintf(stderr, "Teacher token count must equal --predict.\n");
-        llama_model_free(model);
-        llama_backend_free();
-        return 2;
+    int sequence_tokens = p.predict;
+
+    if (scoring_mode) {
+        std::vector<llama_token> heldout_tokens;
+        if (!tokenize(vocab, prompt_text, true, heldout_tokens) ||
+            static_cast<int>(heldout_tokens.size()) <
+                p.score_prefill_tokens + p.score_tokens) {
+            std::fprintf(stderr, "Held-out text has too few tokens for scoring.\n");
+            llama_model_free(model);
+            llama_backend_free();
+            return 2;
+        }
+        prompt.assign(
+            heldout_tokens.begin(),
+            heldout_tokens.begin() + p.score_prefill_tokens);
+        teacher_tokens.assign(
+            heldout_tokens.begin() + p.score_prefill_tokens,
+            heldout_tokens.begin() + p.score_prefill_tokens + p.score_tokens);
+        sequence_tokens = p.score_tokens;
+    } else {
+        if (!exact_prompt(vocab, prompt_text, p.context_tokens, prompt)) {
+            llama_model_free(model);
+            llama_backend_free();
+            return 1;
+        }
+        if (!parse_teacher_token_ids(p.teacher_token_ids, vocab, teacher_tokens)) {
+            std::fprintf(stderr, "Invalid --teacher-token-ids value.\n");
+            llama_model_free(model);
+            llama_backend_free();
+            return 2;
+        }
+        if (!teacher_tokens.empty() &&
+            static_cast<int>(teacher_tokens.size()) != sequence_tokens) {
+            std::fprintf(stderr, "Teacher token count must equal --predict.\n");
+            llama_model_free(model);
+            llama_backend_free();
+            return 2;
+        }
     }
 
-    const int minimum_ctx = static_cast<int>(prompt.size()) + p.predict;
+    const int minimum_ctx = static_cast<int>(prompt.size()) + sequence_tokens;
     if (p.ctx_size != 0 && p.ctx_size < minimum_ctx) {
         std::fprintf(stderr, "Requested context capacity %d is smaller than prompt plus generation (%d).\n", p.ctx_size, minimum_ctx);
         llama_model_free(model);
@@ -313,8 +397,9 @@ int main(int argc, char ** argv) {
 
     for (int i = 0; i < p.warmup; ++i) {
         result warm;
-        if (!generate(ctx, vocab, prompt, p.predict, p.trace_logits,
-                      teacher_tokens.empty() ? nullptr : &teacher_tokens, false, warm)) {
+        if (!generate(ctx, vocab, prompt, sequence_tokens, p.trace_logits,
+                      teacher_tokens.empty() ? nullptr : &teacher_tokens,
+                      scoring_mode, false, warm)) {
             std::fprintf(stderr, "Warmup failed.\n");
             llama_free(ctx); llama_model_free(model); llama_backend_free();
             return 1;
@@ -325,8 +410,9 @@ int main(int argc, char ** argv) {
     std::vector<double> timings;
     for (int i = 0; i < p.runs; ++i) {
         result current;
-        if (!generate(ctx, vocab, prompt, p.predict, p.trace_logits,
-                      teacher_tokens.empty() ? nullptr : &teacher_tokens, true, current)) {
+        if (!generate(ctx, vocab, prompt, sequence_tokens, p.trace_logits,
+                      teacher_tokens.empty() ? nullptr : &teacher_tokens,
+                      scoring_mode, true, current)) {
             std::fprintf(stderr, "Generation failed.\n");
             llama_free(ctx); llama_model_free(model); llama_backend_free();
             return 1;
@@ -364,11 +450,21 @@ int main(int argc, char ** argv) {
             record.top1_logit - record.top2_logit,
             record.finite ? 1 : 0);
     }
+    if (scoring_mode) {
+        const double mean_nll = first.negative_log_likelihood / first.scored_tokens;
+        std::printf("SCORED_TOKEN_COUNT=%d\n", first.scored_tokens);
+        std::printf("NEGATIVE_LOG_LIKELIHOOD=%.12g\n", first.negative_log_likelihood);
+        std::printf("MEAN_NEGATIVE_LOG_LIKELIHOOD=%.12g\n", mean_nll);
+        std::printf("PERPLEXITY=%.12g\n", std::exp(mean_nll));
+        std::printf("SCORING_FINITE=%d\n", first.scoring_finite ? 1 : 0);
+    }
     std::printf("TIMED_DECODE_STEPS=%d\nTIMED_RUNS=%d\n", first.decode_steps, p.runs);
     std::printf("DECODE_MEAN_MS=%.6f\nDECODE_TOKENS_PER_SECOND=%.6f\n", mean, tps);
 
     llama_free(ctx);
     llama_model_free(model);
     llama_backend_free();
-    return first.ids.size() == (size_t) p.predict ? 0 : 3;
+    return first.ids.size() == static_cast<size_t>(sequence_tokens) &&
+        (!scoring_mode || first.scored_tokens == sequence_tokens && first.scoring_finite)
+        ? 0 : 3;
 }
