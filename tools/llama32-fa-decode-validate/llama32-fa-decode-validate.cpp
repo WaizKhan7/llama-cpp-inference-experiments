@@ -468,6 +468,12 @@ int main(int argc, char ** argv) {
 
     const double sum = std::accumulate(timings.begin(), timings.end(), 0.0);
     const double mean = sum / timings.size();
+    double squared_error_sum = 0.0;
+    for (const double timing : timings) {
+        const double error = timing - mean;
+        squared_error_sum += error * error;
+    }
+    const double stddev = std::sqrt(squared_error_sum / timings.size());
     const double tps = sum > 0.0
         ? (double) first.decode_steps * timings.size() / (sum / 1000.0) : 0.0;
 
@@ -511,7 +517,7 @@ int main(int argc, char ** argv) {
         std::printf("SCORING_FINITE=%d\n", first.scoring_finite ? 1 : 0);
     }
     std::printf("TIMED_DECODE_STEPS=%d\nTIMED_RUNS=%d\n", first.decode_steps, p.runs);
-    std::printf("DECODE_MEAN_MS=%.6f\nDECODE_TOKENS_PER_SECOND=%.6f\n", mean, tps);
+    std::printf("DECODE_MEAN_MS=%.6f\nDECODE_STD_MS=%.6f\nDECODE_TOKENS_PER_SECOND=%.6f\n", mean, stddev, tps);
 
     llama_free(ctx);
     llama_model_free(model);
