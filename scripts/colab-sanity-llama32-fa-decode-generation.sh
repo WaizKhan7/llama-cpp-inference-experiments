@@ -8,8 +8,8 @@ mkdir -p "$O"
 CTX=$((PT + N))
 BATCH=$((PT > 2048 ? PT : 2048))
 ARGS=(--model "$M" --prompt-file "$P" --context-tokens "$PT" --ctx-size "$CTX" --predict "$N" --gpu-layers "$G" --batch-size "$BATCH" --ubatch-size 512 --runs 3 --trace-logits --flash-attn on)
-env -u GGML_CUDA_LLAMA32_FA_DECODE_ENABLED -u GGML_CUDA_LLAMA32_FA_DECODE_TRACE "$H" "\${ARGS[@]}" > "$O/builtin.txt" 2> "$O/builtin.stderr"
-env GGML_CUDA_LLAMA32_FA_DECODE_ENABLED=1 GGML_CUDA_LLAMA32_FA_DECODE_TRACE=1 "$H" "\${ARGS[@]}" > "$O/custom.txt" 2> "$O/custom.stderr"
+env -u GGML_CUDA_LLAMA32_FA_DECODE_ENABLED -u GGML_CUDA_LLAMA32_FA_DECODE_TRACE "$H" "${ARGS[@]}" > "$O/builtin.txt" 2> "$O/builtin.stderr"
+env GGML_CUDA_LLAMA32_FA_DECODE_ENABLED=1 GGML_CUDA_LLAMA32_FA_DECODE_TRACE=1 "$H" "${ARGS[@]}" > "$O/custom.txt" 2> "$O/custom.stderr"
 for IMPL in builtin custom; do
   FILE="$O/$IMPL.txt"
   for KEY in PROMPT_TOKEN_COUNT GENERATED_TOKEN_COUNT STOP_REASON LOGIT_TRACE_ENABLED LOGITS_FINITE INTRA_IMPLEMENTATION_DETERMINISTIC TIMED_RUNS; do
