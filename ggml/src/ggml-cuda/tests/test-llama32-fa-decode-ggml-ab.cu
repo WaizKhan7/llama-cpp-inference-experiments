@@ -24,6 +24,11 @@ constexpr int OUTPUT_GUARD = 32;
 constexpr float SCALE = 0.125f;
 constexpr float SENTINEL = -777.0f;
 
+// Calibrated from the production-flag T4 sweep in Entry 040. These limits
+// are validation-only; production inference never computes the FP64 reference.
+constexpr double CUSTOM_REFERENCE_MAX_ABS_LIMIT = 2.0e-4;
+constexpr double CUSTOM_REFERENCE_MEAN_ABS_LIMIT = 5.0e-5;
+
 void check_cuda(cudaError_t status, const char * operation) {
     if (status != cudaSuccess) {
         std::fprintf(stderr, "CUDA %s: %s\n", operation, cudaGetErrorString(status));
@@ -380,20 +385,26 @@ bool run_case(
     const comparison builtin_ref = compare_reference(builtin, reference);
     const comparison custom_ref = compare_reference(custom, reference);
     const double count = static_cast<double>(HQ * D);
+    const double custom_ref_mean = custom_ref.sum_abs / count;
+    const bool custom_reference_within_limits =
+        custom_ref.max_abs <= CUSTOM_REFERENCE_MAX_ABS_LIMIT &&
+        custom_ref_mean <= CUSTOM_REFERENCE_MEAN_ABS_LIMIT;
     const bool ok =
         pair.finite && pair.padding_untouched &&
-        builtin_ref.finite && custom_ref.finite;
+        builtin_ref.finite && custom_ref.finite &&
+        custom_reference_within_limits;
 
     std::printf(
         "visible=%d padded=%d pattern=%s seed=%u "
         "builtin_custom_max=%.9g builtin_custom_mean=%.9g "
         "builtin_ref_max=%.9g builtin_ref_mean=%.9g "
         "custom_ref_max=%.9g custom_ref_mean=%.9g "
-        "max_head=%d max_dim=%d finite=%d output_guard=%d: %s\n",
+        "custom_ref_limits=%d max_head=%d max_dim=%d finite=%d output_guard=%d: %s\n",
         visible, padded, pattern_name(pattern), seed,
         pair.max_abs, pair.sum_abs / count,
         builtin_ref.max_abs, builtin_ref.sum_abs / count,
-        custom_ref.max_abs, custom_ref.sum_abs / count,
+        custom_ref.max_abs, custom_ref_mean,
+        custom_reference_within_limits ? 1 : 0,
         pair.max_head, pair.max_dim,
         (pair.finite && builtin_ref.finite && custom_ref.finite) ? 1 : 0,
         pair.padding_untouched ? 1 : 0, ok ? "PASS" : "FAIL");
@@ -425,8 +436,10 @@ int main() {
 
     // Length 1 is a first-decode smoke test. The remaining contexts are the
     // compact article sweep shared by correctness and benchmark reporting.
+    // Seeds 1-3 calibrated the validation limits; held-out seeds 4-6 validate
+    // them without changing the kernel or the test patterns.
     for (const int visible : {1, 128, 512, 2048, 4096, 8192}) {
-        for (uint32_t seed = 1; seed <= 3; ++seed) {
+        for (uint32_t seed = 4; seed <= 6; ++seed) {
             ok = run_case(context, visible, input_pattern::random, seed) && ok;
         }
         ok = run_case(context, visible, input_pattern::zeros, 0) && ok;
