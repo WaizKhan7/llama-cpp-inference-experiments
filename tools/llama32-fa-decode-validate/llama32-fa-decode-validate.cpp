@@ -24,6 +24,7 @@ struct params {
     int warmup = 0;
     int runs = 1;
     bool trace_logits = false;
+    std::string teacher_token_ids;
     llama_flash_attn_type flash_attn = LLAMA_FLASH_ATTN_TYPE_ENABLED;
 };
 
@@ -55,6 +56,7 @@ static void usage(const char * p) {
         "  --warmup N          untimed repeats; default 0\n"
         "  --runs N            timed repeats; default 1\n"
         "  --trace-logits      print raw top-1/top-2 logits for diagnosis\n"
+        "  --teacher-token-ids CSV  force this comma-separated token history\n"
         "  --flash-attn on|off default on\n", p);
 }
 
@@ -81,6 +83,7 @@ static bool parse(int argc, char ** argv, params & p) {
         else if (std::strcmp(a, "--warmup") == 0 && ++i < argc) { if (!positive(argv[i], p.warmup, true)) return false; }
         else if (std::strcmp(a, "--runs") == 0 && ++i < argc) { if (!positive(argv[i], p.runs)) return false; }
         else if (std::strcmp(a, "--trace-logits") == 0) p.trace_logits = true;
+        else if (std::strcmp(a, "--teacher-token-ids") == 0 && ++i < argc) p.teacher_token_ids = argv[i];
         else if (std::strcmp(a, "--flash-attn") == 0 && ++i < argc) {
             if (std::strcmp(argv[i], "on") == 0) p.flash_attn = LLAMA_FLASH_ATTN_TYPE_ENABLED;
             else if (std::strcmp(argv[i], "off") == 0) p.flash_attn = LLAMA_FLASH_ATTN_TYPE_DISABLED;
@@ -128,6 +131,27 @@ static bool exact_prompt(const llama_vocab * vocab, const std::string & text,
     return true;
 }
 
+static bool parse_teacher_token_ids(
+        const std::string & text, const llama_vocab * vocab,
+        std::vector<llama_token> & tokens) {
+    if (text.empty()) return true;
+    const int32_t n_vocab = llama_vocab_n_tokens(vocab);
+    size_t begin = 0;
+    while (begin < text.size()) {
+        const size_t end = text.find(',', begin);
+        const std::string item = text.substr(begin, end == std::string::npos
+            ? std::string::npos : end - begin);
+        char * parsed_end = nullptr;
+        const long value = std::strtol(item.c_str(), &parsed_end, 10);
+        if (item.empty() || parsed_end == item.c_str() || *parsed_end != '\0' ||
+            value < 0 || value >= n_vocab) return false;
+        tokens.push_back(static_cast<llama_token>(value));
+        if (end == std::string::npos) break;
+        begin = end + 1;
+    }
+    return !tokens.empty();
+}
+
 static bool record_logits(llama_context * ctx, const llama_vocab * vocab,
                           int step, result & out) {
     const float * values = llama_get_logits_ith(ctx, -1);
@@ -157,52 +181,64 @@ static bool record_logits(llama_context * ctx, const llama_vocab * vocab,
 
 static bool generate(llama_context * ctx, const llama_vocab * vocab,
                      const std::vector<llama_token> & prompt, int n_predict,
-                     bool trace_logits, bool timed, result & out) {
+                     bool trace_logits, const std::vector<llama_token> * teacher_tokens,
+                     bool timed, result & out) {
     llama_memory_clear(llama_get_memory(ctx), false);
-    llama_sampler * sampler = llama_sampler_init_greedy();
-    if (!sampler) return false;
+    llama_sampler * sampler = teacher_tokens == nullptr
+        ? llama_sampler_init_greedy() : nullptr;
+    if (teacher_tokens == nullptr && !sampler) return false;
 
     llama_batch batch = llama_batch_get_one(
         const_cast<llama_token *>(prompt.data()), (int32_t) prompt.size());
     if (llama_decode(ctx, batch) != 0) {
-        llama_sampler_free(sampler);
+        if (sampler) llama_sampler_free(sampler);
         return false;
     }
     if (trace_logits && !record_logits(ctx, vocab, 0, out)) {
-        llama_sampler_free(sampler);
+        if (sampler) llama_sampler_free(sampler);
         return false;
     }
 
-    llama_token token = llama_sampler_sample(sampler, ctx, -1);
-    if (!llama_vocab_is_eog(vocab, token)) {
-        out.ids.push_back(token);
-        llama_sampler_accept(sampler, token);
-        batch = llama_batch_get_one(&token, 1);
-    }
-
     const auto start = std::chrono::steady_clock::now();
-    while ((int) out.ids.size() < n_predict) {
-        if (llama_decode(ctx, batch) != 0) {
-            llama_sampler_free(sampler);
-            return false;
+    if (teacher_tokens != nullptr) {
+        for (size_t step = 0; step < teacher_tokens->size(); ++step) {
+            llama_token token = (*teacher_tokens)[step];
+            out.ids.push_back(token);
+            if (step + 1 == teacher_tokens->size()) break;
+            batch = llama_batch_get_one(&token, 1);
+            if (llama_decode(ctx, batch) != 0) return false;
+            ++out.decode_steps;
+            if (trace_logits && !record_logits(
+                    ctx, vocab, static_cast<int>(step + 1), out)) return false;
         }
-        ++out.decode_steps;
-        if (trace_logits && !record_logits(
-                ctx, vocab, static_cast<int>(out.ids.size()), out)) {
-            llama_sampler_free(sampler);
-            return false;
+    } else {
+        llama_token token = llama_sampler_sample(sampler, ctx, -1);
+        if (!llama_vocab_is_eog(vocab, token)) {
+            out.ids.push_back(token);
+            llama_sampler_accept(sampler, token);
+            batch = llama_batch_get_one(&token, 1);
         }
-        token = llama_sampler_sample(sampler, ctx, -1);
-        if (llama_vocab_is_eog(vocab, token)) break;
-        out.ids.push_back(token);
-        llama_sampler_accept(sampler, token);
-        batch = llama_batch_get_one(&token, 1);
+        while ((int) out.ids.size() < n_predict) {
+            if (llama_decode(ctx, batch) != 0) {
+                llama_sampler_free(sampler);
+                return false;
+            }
+            ++out.decode_steps;
+            if (trace_logits && !record_logits(
+                    ctx, vocab, static_cast<int>(out.ids.size()), out)) {
+                llama_sampler_free(sampler);
+                return false;
+            }
+            token = llama_sampler_sample(sampler, ctx, -1);
+            if (llama_vocab_is_eog(vocab, token)) break;
+            out.ids.push_back(token);
+            llama_sampler_accept(sampler, token);
+            batch = llama_batch_get_one(&token, 1);
+        }
     }
-    if (timed) {
-        out.decode_ms = std::chrono::duration<double, std::milli>(
-            std::chrono::steady_clock::now() - start).count();
-    }
-    llama_sampler_free(sampler);
+    if (timed) out.decode_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - start).count();
+    if (sampler) llama_sampler_free(sampler);
     return true;
 }
 
@@ -239,6 +275,20 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
+    std::vector<llama_token> teacher_tokens;
+    if (!parse_teacher_token_ids(p.teacher_token_ids, vocab, teacher_tokens)) {
+        std::fprintf(stderr, "Invalid --teacher-token-ids value.\n");
+        llama_model_free(model);
+        llama_backend_free();
+        return 2;
+    }
+    if (!teacher_tokens.empty() && static_cast<int>(teacher_tokens.size()) != p.predict) {
+        std::fprintf(stderr, "Teacher token count must equal --predict.\n");
+        llama_model_free(model);
+        llama_backend_free();
+        return 2;
+    }
+
     const int minimum_ctx = static_cast<int>(prompt.size()) + p.predict;
     if (p.ctx_size != 0 && p.ctx_size < minimum_ctx) {
         std::fprintf(stderr, "Requested context capacity %d is smaller than prompt plus generation (%d).\n", p.ctx_size, minimum_ctx);
@@ -263,7 +313,8 @@ int main(int argc, char ** argv) {
 
     for (int i = 0; i < p.warmup; ++i) {
         result warm;
-        if (!generate(ctx, vocab, prompt, p.predict, p.trace_logits, false, warm)) {
+        if (!generate(ctx, vocab, prompt, p.predict, p.trace_logits,
+                      teacher_tokens.empty() ? nullptr : &teacher_tokens, false, warm)) {
             std::fprintf(stderr, "Warmup failed.\n");
             llama_free(ctx); llama_model_free(model); llama_backend_free();
             return 1;
@@ -274,7 +325,8 @@ int main(int argc, char ** argv) {
     std::vector<double> timings;
     for (int i = 0; i < p.runs; ++i) {
         result current;
-        if (!generate(ctx, vocab, prompt, p.predict, p.trace_logits, true, current)) {
+        if (!generate(ctx, vocab, prompt, p.predict, p.trace_logits,
+                      teacher_tokens.empty() ? nullptr : &teacher_tokens, true, current)) {
             std::fprintf(stderr, "Generation failed.\n");
             llama_free(ctx); llama_model_free(model); llama_backend_free();
             return 1;
