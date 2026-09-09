@@ -370,7 +370,8 @@ bool run_case(
     // llama.cpp's normal built-in kernel. The custom launcher is then invoked
     // directly with the same tensors to avoid changing process-global routing.
     ggml_cuda_flash_attn_ext(context, &td_builtin);
-    ggml_cuda_llama32_fa_decode(context, &td_custom);
+    // Exercise experimental Split-K directly; production routing remains unchanged.
+    ggml_cuda_llama32_fd_splitk(context, &td_custom);
     check_cuda(cudaGetLastError(), "launch");
     check_cuda(cudaDeviceSynchronize(), "synchronize");
 

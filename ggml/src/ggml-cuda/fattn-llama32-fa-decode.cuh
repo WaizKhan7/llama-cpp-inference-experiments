@@ -202,6 +202,85 @@ static __global__ void llama32_fa_decode_ggml_kernel(
     *reinterpret_cast<float *>(out_head + d1 * dst_nb0) = merged_accumulator1 * inverse_sum;
 }
 
+// Experimental two-pass Split-K / Flash-Decoding implementation. A partial
+// block owns one 128-token chunk for one query head and writes its unnormalised
+// stable-softmax state; the reduction block merges chunk states per head.
+static constexpr int llama32_fd_chunk = 128;
+static constexpr int llama32_fd_dim = 64;
+
+static __global__ void llama32_fd_partial(
+        const char * Q, const char * K, const char * V, const char * mask,
+        float * partial_out, float * partial_max, float * partial_lse,
+        float scale, int kv_len, int chunks,
+        size_t q_nb0, size_t q_nb2, size_t k_nb0, size_t k_nb1, size_t k_nb2,
+        size_t v_nb0, size_t v_nb1, size_t v_nb2, size_t mask_nb0) {
+    const int lane = threadIdx.x;
+    const int chunk = blockIdx.x;
+    const int head = blockIdx.y;
+    const int kv_head = head / 4;
+    const int begin = chunk * llama32_fd_chunk;
+    const int end = min(begin + llama32_fd_chunk, kv_len);
+    const char * q_head = Q + head * q_nb2;
+    const char * k_head = K + kv_head * k_nb2;
+    const char * v_head = V + kv_head * v_nb2;
+    const float q0 = *reinterpret_cast<const float *>(q_head + lane * q_nb0);
+    const float q1 = *reinterpret_cast<const float *>(q_head + (lane + 32) * q_nb0);
+    float max_score = -CUDART_INF_F, sum = 0.0f, acc0 = 0.0f, acc1 = 0.0f;
+
+    for (int pos = begin; pos < end; ++pos) {
+        const float loaded_mask = lane == 0
+            ? __half2float(*reinterpret_cast<const half *>(mask + pos * mask_nb0)) : 0.0f;
+        const float mask_value = __shfl_sync(0xffffffffu, loaded_mask, 0);
+        if (mask_value == -CUDART_INF_F) continue;
+        const char * k_row = k_head + pos * k_nb1;
+        const float k0 = __half2float(*reinterpret_cast<const half *>(k_row + lane * k_nb0));
+        const float k1 = __half2float(*reinterpret_cast<const half *>(k_row + (lane + 32) * k_nb0));
+        const float score = llama32_fa_decode_warp_sum(q0 * k0 + q1 * k1) * scale + mask_value;
+        const float new_max = fmaxf(max_score, score);
+        const float old_scale = sum > 0.0f ? expf(max_score - new_max) : 0.0f;
+        const float weight = expf(score - new_max);
+        const char * v_row = v_head + pos * v_nb1;
+        const float v0 = __half2float(*reinterpret_cast<const half *>(v_row + lane * v_nb0));
+        const float v1 = __half2float(*reinterpret_cast<const half *>(v_row + (lane + 32) * v_nb0));
+        acc0 = acc0 * old_scale + weight * v0;
+        acc1 = acc1 * old_scale + weight * v1;
+        sum = sum * old_scale + weight;
+        max_score = new_max;
+    }
+    const int index = head * chunks + chunk;
+    partial_out[index * llama32_fd_dim + lane] = acc0;
+    partial_out[index * llama32_fd_dim + lane + 32] = acc1;
+    if (lane == 0) {
+        partial_max[index] = max_score;
+        partial_lse[index] = sum > 0.0f ? logf(sum) : -CUDART_INF_F;
+    }
+}
+
+static __global__ void llama32_fd_reduce(
+        const float * partial_out, const float * partial_max, const float * partial_lse,
+        char * output, int chunks, size_t dst_nb0, size_t dst_nb1) {
+    const int lane = threadIdx.x;
+    const int head = blockIdx.x;
+    float max_score = -CUDART_INF_F, sum = 0.0f, acc0 = 0.0f, acc1 = 0.0f;
+    for (int chunk = 0; chunk < chunks; ++chunk) {
+        const int index = head * chunks + chunk;
+        const float chunk_max = partial_max[index];
+        const float chunk_lse = partial_lse[index];
+        if (!isfinite(chunk_max) || !isfinite(chunk_lse)) continue;
+        const float new_max = fmaxf(max_score, chunk_max);
+        const float old_scale = sum > 0.0f ? expf(max_score - new_max) : 0.0f;
+        const float chunk_scale = expf(chunk_max - new_max);
+        acc0 = acc0 * old_scale + partial_out[index * llama32_fd_dim + lane] * chunk_scale;
+        acc1 = acc1 * old_scale + partial_out[index * llama32_fd_dim + lane + 32] * chunk_scale;
+        sum = sum * old_scale + expf(chunk_lse) * chunk_scale;
+        max_score = new_max;
+    }
+    const float inv_sum = sum > 0.0f ? 1.0f / sum : 0.0f;
+    char * out = output + head * dst_nb1;
+    *reinterpret_cast<float *>(out + lane * dst_nb0) = acc0 * inv_sum;
+    *reinterpret_cast<float *>(out + (lane + 32) * dst_nb0) = acc1 * inv_sum;
+}
+
 // The dispatcher calls this launcher only after the strict decode predicate passes.
 static inline void ggml_cuda_llama32_fa_decode(
         ggml_backend_cuda_context & ctx,
@@ -227,4 +306,36 @@ static inline void ggml_cuda_llama32_fa_decode(
         mask->nb[0], dst->nb[0], dst->nb[1]);
     CUDA_CHECK(cudaGetLastError());
 }
+
+
+// This launcher is intentionally not routed by fattn.cu yet. It is exercised
+// only by the direct FP64 A/B fixture until its correctness gates pass.
+static inline void ggml_cuda_llama32_fd_splitk(
+        ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    GGML_ASSERT(ggml_cuda_llama32_fa_decode_supported(dst));
+    const ggml_tensor * Q = dst->src[0];
+    const ggml_tensor * K = dst->src[1];
+    const ggml_tensor * V = dst->src[2];
+    const ggml_tensor * mask = dst->src[3];
+    float scale = 1.0f;
+    memcpy(&scale, (const float *) dst->op_params, sizeof(float));
+    const int chunks = (K->ne[1] + llama32_fd_chunk - 1) / llama32_fd_chunk;
+    const size_t count = static_cast<size_t>(Q->ne[2]) * chunks;
+    ggml_cuda_pool_alloc<float> partial_out(ctx.pool(), count * llama32_fd_dim);
+    ggml_cuda_pool_alloc<float> partial_max(ctx.pool(), count);
+    ggml_cuda_pool_alloc<float> partial_lse(ctx.pool(), count);
+    const dim3 partial_grid(chunks, Q->ne[2], 1);
+    const dim3 block(32, 1, 1);
+    llama32_fd_partial<<<partial_grid, block, 0, ctx.stream()>>>(
+        (const char *) Q->data, (const char *) K->data, (const char *) V->data,
+        (const char *) mask->data, partial_out.get(), partial_max.get(), partial_lse.get(),
+        scale, K->ne[1], chunks, Q->nb[0], Q->nb[2], K->nb[0], K->nb[1], K->nb[2],
+        V->nb[0], V->nb[1], V->nb[2], mask->nb[0]);
+    CUDA_CHECK(cudaGetLastError());
+    llama32_fd_reduce<<<dim3(Q->ne[2], 1, 1), block, 0, ctx.stream()>>>(
+        partial_out.get(), partial_max.get(), partial_lse.get(), (char *) dst->data,
+        chunks, dst->nb[0], dst->nb[1]);
+    CUDA_CHECK(cudaGetLastError());
+}
+
 #endif // GGML_CUDA_LLAMA32_FA_DECODE
