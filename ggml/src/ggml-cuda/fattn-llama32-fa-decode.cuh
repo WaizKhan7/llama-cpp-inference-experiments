@@ -87,8 +87,8 @@ static inline bool ggml_cuda_llama32_fa_decode_supported(const ggml_tensor * dst
     return max_bias == 0.0f && logit_softcap == 0.0f;
 }
 
-// One CUDA warp owns one query head. Each lane owns dimensions lane and
-// lane + 32, matching the readable raw CUDA FA-decode implementation.
+// Four CUDA warps cooperate on one query head. Each lane owns dimensions lane
+// and lane + 32; each warp processes a disjoint quarter of the KV positions.
 static __device__ __forceinline__ float llama32_fa_decode_warp_sum(float value) {
     for (int offset = 16; offset > 0; offset /= 2) {
         value += __shfl_down_sync(0xffffffffu, value, offset);
@@ -111,10 +111,13 @@ static __global__ void llama32_fa_decode_ggml_kernel(
         size_t v_nb0, size_t v_nb1, size_t v_nb2,
         size_t mask_nb0,
         size_t dst_nb0, size_t dst_nb1) {
-    const int lane = threadIdx.x;
+    constexpr int warps_per_head = 4;
+    constexpr int half_dim = 32;
+
+    const int lane = threadIdx.x % warpSize;
+    const int warp_id = threadIdx.x / warpSize;
     const int query_head = blockIdx.x;
     const int kv_head = query_head / 4;
-    constexpr int half_dim = 32;
     const int d0 = lane;
     const int d1 = lane + half_dim;
 
@@ -131,42 +134,75 @@ static __global__ void llama32_fa_decode_ggml_kernel(
     float accumulator0 = 0.0f;
     float accumulator1 = 0.0f;
 
-    for (int tile_start = 0; tile_start < kv_len; tile_start += 128) {
-        const int tile_end = tile_start + 128 < kv_len ? tile_start + 128 : kv_len;
-        for (int key_pos = tile_start; key_pos < tile_end; ++key_pos) {
-            const float mask_value = __half2float(
-                *reinterpret_cast<const half *>(mask + key_pos * mask_nb0));
-            if (mask_value == -CUDART_INF_F) {
-                continue;
-            }
-
-            const char * k_row = k_head + key_pos * k_nb1;
-            const float k0 = __half2float(*reinterpret_cast<const half *>(k_row + d0 * k_nb0));
-            const float k1 = __half2float(*reinterpret_cast<const half *>(k_row + d1 * k_nb0));
-            float score = llama32_fa_decode_warp_sum(q0 * k0 + q1 * k1);
-            score = score * scale + mask_value;
-
-            const float new_max = fmaxf(running_max, score);
-            const float old_scale = expf(running_max - new_max);
-            const float weight = expf(score - new_max);
-
-            const char * v_row = v_head + key_pos * v_nb1;
-            const float value0 = __half2float(*reinterpret_cast<const half *>(v_row + d0 * v_nb0));
-            const float value1 = __half2float(*reinterpret_cast<const half *>(v_row + d1 * v_nb0));
-            accumulator0 = accumulator0 * old_scale + weight * value0;
-            accumulator1 = accumulator1 * old_scale + weight * value1;
-            running_sum = running_sum * old_scale + weight;
-            running_max = new_max;
+    // Each warp scans a disjoint interleaved KV slice. This exposes four times
+    // as many active warps without changing the GQA head mapping or output ABI.
+    for (int key_pos = warp_id; key_pos < kv_len; key_pos += warps_per_head) {
+        const float loaded_mask = lane == 0
+            ? __half2float(*reinterpret_cast<const half *>(mask + key_pos * mask_nb0))
+            : 0.0f;
+        const float mask_value = __shfl_sync(0xffffffffu, loaded_mask, 0);
+        if (mask_value == -CUDART_INF_F) {
+            continue;
         }
+
+        const char * k_row = k_head + key_pos * k_nb1;
+        const float k0 = __half2float(*reinterpret_cast<const half *>(k_row + d0 * k_nb0));
+        const float k1 = __half2float(*reinterpret_cast<const half *>(k_row + d1 * k_nb0));
+        float score = llama32_fa_decode_warp_sum(q0 * k0 + q1 * k1);
+        score = score * scale + mask_value;
+
+        const float new_max = fmaxf(running_max, score);
+        const float old_scale = expf(running_max - new_max);
+        const float weight = expf(score - new_max);
+
+        const char * v_row = v_head + key_pos * v_nb1;
+        const float value0 = __half2float(*reinterpret_cast<const half *>(v_row + d0 * v_nb0));
+        const float value1 = __half2float(*reinterpret_cast<const half *>(v_row + d1 * v_nb0));
+        accumulator0 = accumulator0 * old_scale + weight * value0;
+        accumulator1 = accumulator1 * old_scale + weight * value1;
+        running_sum = running_sum * old_scale + weight;
+        running_max = new_max;
     }
 
-    // A valid causal decode always has at least the just-written current key.
-    const float inverse_sum = running_sum > 0.0f ? 1.0f / running_sum : 0.0f;
-    *reinterpret_cast<float *>(out_head + d0 * dst_nb0) = accumulator0 * inverse_sum;
-    *reinterpret_cast<float *>(out_head + d1 * dst_nb0) = accumulator1 * inverse_sum;
+    // Merge the four independently normalized online-softmax partitions.
+    // The accumulators are stored in their local exp(running_max) scale.
+    __shared__ float partial_max[warps_per_head];
+    __shared__ float partial_sum[warps_per_head];
+    __shared__ float partial_accumulator[warps_per_head][2 * half_dim];
+
+    if (lane == 0) {
+        partial_max[warp_id] = running_max;
+        partial_sum[warp_id] = running_sum;
+    }
+    partial_accumulator[warp_id][d0] = accumulator0;
+    partial_accumulator[warp_id][d1] = accumulator1;
+    __syncthreads();
+
+    float merged_max = partial_max[0];
+#pragma unroll
+    for (int warp = 1; warp < warps_per_head; ++warp) {
+        merged_max = fmaxf(merged_max, partial_max[warp]);
+    }
+
+    float merged_sum = 0.0f;
+    float merged_accumulator0 = 0.0f;
+    float merged_accumulator1 = 0.0f;
+#pragma unroll
+    for (int warp = 0; warp < warps_per_head; ++warp) {
+        const float partition_scale = partial_sum[warp] > 0.0f
+            ? expf(partial_max[warp] - merged_max)
+            : 0.0f;
+        merged_sum += partial_sum[warp] * partition_scale;
+        merged_accumulator0 += partial_accumulator[warp][d0] * partition_scale;
+        merged_accumulator1 += partial_accumulator[warp][d1] * partition_scale;
+    }
+
+    const float inverse_sum = merged_sum > 0.0f ? 1.0f / merged_sum : 0.0f;
+    *reinterpret_cast<float *>(out_head + d0 * dst_nb0) = merged_accumulator0 * inverse_sum;
+    *reinterpret_cast<float *>(out_head + d1 * dst_nb0) = merged_accumulator1 * inverse_sum;
 }
 
-// This launcher is intentionally not called by ggml_cuda_flash_attn_ext yet.
+// The dispatcher calls this launcher only after the strict decode predicate passes.
 static inline void ggml_cuda_llama32_fa_decode(
         ggml_backend_cuda_context & ctx,
         ggml_tensor * dst) {
@@ -181,7 +217,7 @@ static inline void ggml_cuda_llama32_fa_decode(
     memcpy(&scale, (const float *) dst->op_params, sizeof(float));
 
     const dim3 grid(Q->ne[2], 1, 1);
-    const dim3 block(32, 1, 1);
+    const dim3 block(128, 1, 1);
     llama32_fa_decode_ggml_kernel<<<grid, block, 0, ctx.stream()>>>(
         (const char *) Q->data, (const char *) K->data, (const char *) V->data,
         (const char *) mask->data, (char *) dst->data, scale, K->ne[1],
