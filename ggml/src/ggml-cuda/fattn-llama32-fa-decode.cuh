@@ -12,6 +12,7 @@
 #ifdef GGML_CUDA_LLAMA32_FA_DECODE
 #ifdef GGML_CUDA_LLAMA32_FA_DECODE_TEST_HOOK
 extern int ggml_cuda_llama32_fa_decode_test_dispatch_count;
+extern int ggml_cuda_llama32_fa_decode_test_route;
 #endif
 
 // Normal builds require an explicit process-level opt-in. This lets one
@@ -25,6 +26,16 @@ static inline bool ggml_cuda_llama32_fa_decode_enabled() {
     }();
     return enabled;
 }
+// Split-K is separately opt-in. Requiring the existing FA opt-in as well
+// preserves baseline behaviour and makes every experimental selection explicit.
+static inline bool ggml_cuda_llama32_fd_splitk_enabled() {
+    static const bool enabled = []() {
+        const char * value = std::getenv("GGML_CUDA_LLAMA32_FD_SPLITK_ENABLED");
+        return value != nullptr && std::strcmp(value, "1") == 0;
+    }();
+    return enabled;
+}
+
 static inline bool ggml_cuda_llama32_fa_decode_trace_enabled() {
     const char * value = std::getenv("GGML_CUDA_LLAMA32_FA_DECODE_TRACE");
     return value != nullptr && std::strcmp(value, "1") == 0;

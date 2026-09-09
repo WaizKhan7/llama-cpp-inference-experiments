@@ -17,6 +17,7 @@
 
 #ifdef GGML_CUDA_LLAMA32_FA_DECODE_TEST_HOOK
 int ggml_cuda_llama32_fa_decode_test_dispatch_count = 0;
+int ggml_cuda_llama32_fa_decode_test_route = 0;
 #endif
 
 template <int DKQ, int DV, int ncols2>
@@ -461,12 +462,20 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
     // llama.cpp selector below.
     if (ggml_cuda_llama32_fa_decode_enabled() &&
         ggml_cuda_llama32_fa_decode_supported(dst)) {
-        ggml_cuda_llama32_fa_decode(ctx, dst);
+        const bool use_splitk = ggml_cuda_llama32_fd_splitk_enabled();
+        if (use_splitk) {
+            ggml_cuda_llama32_fd_splitk(ctx, dst);
+        } else {
+            ggml_cuda_llama32_fa_decode(ctx, dst);
+        }
         if (ggml_cuda_llama32_fa_decode_trace_enabled()) {
-            std::fprintf(stderr, "llama32-fa-decode route: selected\n");
+            std::fprintf(stderr, use_splitk
+                ? "llama32-fd-splitk route: selected\n"
+                : "llama32-fa-decode route: selected\n");
         }
 #ifdef GGML_CUDA_LLAMA32_FA_DECODE_TEST_HOOK
         ++ggml_cuda_llama32_fa_decode_test_dispatch_count;
+        ggml_cuda_llama32_fa_decode_test_route = use_splitk ? 2 : 1;
 #endif
         return;
     }

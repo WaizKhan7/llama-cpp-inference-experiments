@@ -74,6 +74,7 @@ bool case_test(int visible) {
     std::memcpy(td.op_params, &SCALE, sizeof(SCALE));
 
     ggml_cuda_llama32_fa_decode_test_dispatch_count=0;
+    ggml_cuda_llama32_fa_decode_test_route=0;
     ggml_backend_cuda_context context(0);
     ggml_cuda_flash_attn_ext(context, &td);
     check(cudaGetLastError(),"dispatcher launch");
@@ -81,24 +82,27 @@ bool case_test(int visible) {
     check(cudaMemcpy(out.data(),do_.p,out.size()*sizeof(float),cudaMemcpyDeviceToHost),"copy output back");
     float maxe=0; bool ok=true;
     ok=ok && ggml_cuda_llama32_fa_decode_test_dispatch_count==1;
+    ok=ok && ggml_cuda_llama32_fa_decode_test_route==2;
     for(int h=0;h<HQ;++h) { for(int x=0;x<D;++x) { float a=out[h*OS+x],e=std::fabs(a-ref[h*D+x]); maxe=std::fmax(maxe,e); ok=ok&&std::isfinite(a)&&e<=1e-4f+1e-4f*std::fabs(ref[h*D+x]); } for(int x=D;x<OS;++x) ok=ok&&out[h*OS+x]==SENTINEL; }
-    std::printf("route_count=%d\n", ggml_cuda_llama32_fa_decode_test_dispatch_count);
+    std::printf("route_count=%d route_kind=%d\n", ggml_cuda_llama32_fa_decode_test_dispatch_count, ggml_cuda_llama32_fa_decode_test_route);
     std::printf("visible=%d padded=%d max_abs_error=%.8f: %s\n",visible,padded,maxe,ok?"PASS":"FAIL"); return ok;
 }
 }
 int main() {
 #if defined(_WIN32)
-    if (_putenv_s("GGML_CUDA_LLAMA32_FA_DECODE_ENABLED", "1") != 0) {
+    if (_putenv_s("GGML_CUDA_LLAMA32_FA_DECODE_ENABLED", "1") != 0 ||
+        _putenv_s("GGML_CUDA_LLAMA32_FD_SPLITK_ENABLED", "1") != 0) {
         std::perror("_putenv_s");
         return 1;
     }
 #else
-    if (setenv("GGML_CUDA_LLAMA32_FA_DECODE_ENABLED", "1", 1) != 0) {
+    if (setenv("GGML_CUDA_LLAMA32_FA_DECODE_ENABLED", "1", 1) != 0 ||
+        setenv("GGML_CUDA_LLAMA32_FD_SPLITK_ENABLED", "1", 1) != 0) {
         std::perror("setenv");
         return 1;
     }
 #endif
-    cudaDeviceProp p; check(cudaGetDeviceProperties(&p,0),"get properties"); std::printf("GGML-boundary FA-decode validation on %s\n",p.name);
+    cudaDeviceProp p; check(cudaGetDeviceProperties(&p,0),"get properties"); std::printf("GGML-boundary Split-K FD validation on %s\n",p.name);
     bool ok=guard_test(); for(int visible : {1,127,128,129,255,256,257,511}) ok=case_test(visible)&&ok;
     std::printf("GGML-boundary correctness: %s\n",ok?"PASS":"FAIL"); return ok?0:1;
 }
