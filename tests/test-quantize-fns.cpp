@@ -2,6 +2,7 @@
 
 #include "ggml.h"
 #include "ggml-cpu.h"
+extern "C" void ggml_vec_dot_q4_hqq_q8_0_generic(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
 
 #undef NDEBUG
 #include <assert.h>
@@ -138,6 +139,35 @@ static void test_q4_hqq_roundtrip() {
     }
 }
 
+static void test_q4_hqq_simd_matches_generic() {
+    constexpr int n = 64;
+
+    std::vector<float> weights(n);
+    std::vector<float> activations(n);
+    for (int i = 0; i < n; ++i) {
+        weights[i] = (float) ((i * 17) % 29 - 14) * 0.21f;
+        activations[i] = (float) ((i * 11) % 31 - 15) * 0.13f;
+    }
+
+    const auto * q4 = ggml_get_type_traits(GGML_TYPE_Q4_HQQ);
+    const auto * q4_cpu = ggml_get_type_traits_cpu(GGML_TYPE_Q4_HQQ);
+    const auto * q8_cpu = ggml_get_type_traits_cpu(GGML_TYPE_Q8_0);
+
+    std::vector<uint8_t> qweights(ggml_row_size(GGML_TYPE_Q4_HQQ, n));
+    std::vector<uint8_t> qactivations(ggml_row_size(GGML_TYPE_Q8_0, n));
+    q4->from_float_ref(weights.data(), qweights.data(), n);
+    q8_cpu->from_float(activations.data(), qactivations.data(), n);
+
+    float generic = 0.0f;
+    float simd = 0.0f;
+    ggml_vec_dot_q4_hqq_q8_0_generic(n, &generic, 0, qweights.data(), 0, qactivations.data(), 0, 1);
+    q4_cpu->vec_dot(n, &simd, 0, qweights.data(), 0, qactivations.data(), 0, 1);
+
+    const float diff = fabsf(simd - generic);
+    printf("Q4_HQQ scalar/AVX2 diff: %.9g\n", diff);
+    assert(diff <= 1e-5f);
+}
+
 int main(int argc, char * argv[]) {
     bool verbose = false;
     const size_t test_size = 32 * 128;
@@ -165,6 +195,7 @@ int main(int argc, char * argv[]) {
     int num_failed = 0;
     bool failed = false;
     test_q4_hqq_roundtrip();
+    test_q4_hqq_simd_matches_generic();
 
     for (int i = 0; i < GGML_TYPE_COUNT; i++) {
         ggml_type type = (ggml_type) i;
