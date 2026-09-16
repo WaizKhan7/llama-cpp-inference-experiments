@@ -1,0 +1,6 @@
+set(TARGET llama32-fa-decode-validate)
+add_executable(${TARGET} llama32-fa-decode-validate.cpp)
+target_link_libraries(${TARGET} PRIVATE llama ${CMAKE_THREAD_LIBS_INIT})
+target_compile_features(${TARGET} PRIVATE cxx_std_17)
+llama_add_compile_flags()
+install(TARGETS ${TARGET} RUNTIME)

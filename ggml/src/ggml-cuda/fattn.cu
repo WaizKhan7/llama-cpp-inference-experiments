@@ -1,5 +1,8 @@
 #include "common.cuh"
 #include "fattn-common.cuh"
+#ifdef GGML_CUDA_LLAMA32_FA_DECODE
+#include "fattn-llama32-fa-decode.cuh"
+#endif
 #include "fattn-mma-f16.cuh"
 #include "fattn-tile-f16.cuh"
 #include "fattn-tile-f32.cuh"
@@ -7,6 +10,15 @@
 #include "fattn-vec-f32.cuh"
 #include "fattn-wmma-f16.cuh"
 #include "fattn.cuh"
+
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+
+#ifdef GGML_CUDA_LLAMA32_FA_DECODE_TEST_HOOK
+int ggml_cuda_llama32_fa_decode_test_dispatch_count = 0;
+int ggml_cuda_llama32_fa_decode_test_route = 0;
+#endif
 
 template <int DKQ, int DV, int ncols2>
 static void ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
@@ -279,6 +291,29 @@ enum best_fattn_kernel {
     BEST_FATTN_KERNEL_MMA_F16  = 400,
 };
 
+#ifdef GGML_CUDA_LLAMA32_FA_DECODE
+// Diagnostic-only switch. It reports which unchanged llama.cpp attention
+// implementation the baseline selector chose after the custom route declined.
+// It is intentionally off by default and is never enabled during timing.
+static bool ggml_cuda_llama32_fa_decode_profile_trace_enabled() {
+    const char * value = std::getenv("GGML_CUDA_LLAMA32_FA_DECODE_PROFILE_TRACE");
+    return value != nullptr && std::strcmp(value, "1") == 0;
+}
+
+static const char * ggml_cuda_fattn_kernel_name(const best_fattn_kernel kernel) {
+    switch (kernel) {
+        case BEST_FATTN_KERNEL_NONE:     return "none";
+        case BEST_FATTN_KERNEL_TILE_F32: return "tile_f32";
+        case BEST_FATTN_KERNEL_TILE_F16: return "tile_f16";
+        case BEST_FATTN_KERNEL_VEC_F32:  return "vec_f32";
+        case BEST_FATTN_KERNEL_VEC_F16:  return "vec_f16";
+        case BEST_FATTN_KERNEL_WMMA_F16: return "wmma_f16";
+        case BEST_FATTN_KERNEL_MMA_F16:  return "mma_f16";
+    }
+    return "unknown";
+}
+#endif
+
 static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const ggml_tensor * dst) {
 #ifndef FLASH_ATTN_AVAILABLE
     GGML_UNUSED(device); GGML_UNUSED(dst);
@@ -419,7 +454,44 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
 
 void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     ggml_cuda_set_device(ctx.device);
-    switch (ggml_cuda_get_best_fattn_kernel(ggml_cuda_get_device(), dst)) {
+
+#ifdef GGML_CUDA_LLAMA32_FA_DECODE
+    // First specialization only: one Llama 3.2-1B decode token with the
+    // exact GGML layout validated by the boundary fixture. The predicate is
+    // deliberately strict; every unsupported operation uses the unchanged
+    // llama.cpp selector below.
+    if (ggml_cuda_llama32_fa_decode_enabled() &&
+        ggml_cuda_llama32_fa_decode_supported(dst)) {
+        const bool use_splitk = ggml_cuda_llama32_fd_splitk_enabled();
+        if (use_splitk) {
+            ggml_cuda_llama32_fd_splitk(ctx, dst);
+        } else {
+            ggml_cuda_llama32_fa_decode(ctx, dst);
+        }
+        if (ggml_cuda_llama32_fa_decode_trace_enabled()) {
+            std::fprintf(stderr, use_splitk
+                ? "llama32-fd-splitk route: selected\n"
+                : "llama32-fa-decode route: selected\n");
+        }
+#ifdef GGML_CUDA_LLAMA32_FA_DECODE_TEST_HOOK
+        ++ggml_cuda_llama32_fa_decode_test_dispatch_count;
+        ggml_cuda_llama32_fa_decode_test_route = use_splitk ? 2 : 1;
+#endif
+        return;
+    }
+#endif
+
+    const best_fattn_kernel best_kernel =
+        ggml_cuda_get_best_fattn_kernel(ggml_cuda_get_device(), dst);
+
+#ifdef GGML_CUDA_LLAMA32_FA_DECODE
+    if (ggml_cuda_llama32_fa_decode_profile_trace_enabled()) {
+        std::fprintf(stderr, "llama32-fa-decode baseline selector: %s\n",
+                     ggml_cuda_fattn_kernel_name(best_kernel));
+    }
+#endif
+
+    switch (best_kernel) {
         case BEST_FATTN_KERNEL_NONE:
             GGML_ABORT("fatal error");
         case BEST_FATTN_KERNEL_TILE_F32:

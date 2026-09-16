@@ -177,6 +177,65 @@ if (CUDAToolkit_FOUND)
     endif()
 
     target_compile_options(ggml-cuda PRIVATE "$<$<COMPILE_LANGUAGE:CUDA>:${CUDA_FLAGS}>")
+
+    # Experimental, un-routed Llama 3.2 FA-decode adapter.
+    option(GGML_CUDA_LLAMA32_FA_DECODE [=[Compile the experimental Llama 3.2 one-token FA-decode adapter]=] OFF)
+    if (GGML_CUDA_LLAMA32_FA_DECODE)
+        add_compile_definitions(GGML_CUDA_LLAMA32_FA_DECODE)
+    endif()
+
+    # Optional, standalone correctness and timing harness for the experimental
+    # Llama 3.2-1B single-token decode kernel. It is intentionally separate
+    # from GGML dispatch until raw CUDA parity has been demonstrated.
+    option(GGML_CUDA_LLAMA32_DECODE_TESTS "Build the Llama 3.2 raw decode CUDA harness" OFF)
+    if (GGML_CUDA_LLAMA32_DECODE_TESTS)
+        add_executable(test-cuda-llama32-fa-decode
+            tests/test-llama32-fa-decode.cu)
+        set_target_properties(test-cuda-llama32-fa-decode PROPERTIES
+            CUDA_STANDARD 17
+            CUDA_STANDARD_REQUIRED ON)
+        target_link_libraries(test-cuda-llama32-fa-decode PRIVATE CUDA::cudart)
+
+        if (GGML_CUDA_LLAMA32_FA_DECODE)
+            # This hook exists only in the CUDA test build. It lets the
+            # boundary fixture prove that the real dispatcher selected the
+            # specialized route.
+            target_compile_definitions(ggml-cuda PRIVATE GGML_CUDA_LLAMA32_FA_DECODE_TEST_HOOK)
+            add_executable(test-cuda-llama32-fa-decode-ggml-boundary
+                tests/test-llama32-fa-decode-ggml-boundary.cu)
+            set_target_properties(test-cuda-llama32-fa-decode-ggml-boundary PROPERTIES
+                CUDA_STANDARD 17
+                CUDA_STANDARD_REQUIRED ON)
+            target_include_directories(test-cuda-llama32-fa-decode-ggml-boundary PRIVATE
+                tests
+                ..
+                ../../include)
+            target_compile_definitions(test-cuda-llama32-fa-decode-ggml-boundary PRIVATE GGML_CUDA_LLAMA32_FA_DECODE_TEST_HOOK)
+            target_link_libraries(test-cuda-llama32-fa-decode-ggml-boundary PRIVATE
+                ggml-cuda
+                CUDA::cudart)
+
+            # Diagnostic A/B fixture: run llama.cpp's built-in Flash Attention
+            # and the custom kernel on identical GGML tensors.
+            add_executable(test-cuda-llama32-fa-decode-ggml-ab
+                tests/test-llama32-fa-decode-ggml-ab.cu)
+            set_target_properties(test-cuda-llama32-fa-decode-ggml-ab PROPERTIES
+                CUDA_STANDARD 17
+                CUDA_STANDARD_REQUIRED ON)
+            # The test instantiates the header-defined custom kernel directly.
+            # Match ggml-cuda's CUDA arithmetic options exactly.
+            target_compile_options(test-cuda-llama32-fa-decode-ggml-ab PRIVATE
+                "$<$<COMPILE_LANGUAGE:CUDA>:${CUDA_FLAGS}>")
+            target_include_directories(test-cuda-llama32-fa-decode-ggml-ab PRIVATE
+                tests
+                ..
+                ../../include)
+            target_link_libraries(test-cuda-llama32-fa-decode-ggml-ab PRIVATE
+                ggml-cuda
+                ggml-base
+                CUDA::cudart)
+        endif()
+    endif()
 else()
     message(FATAL_ERROR "CUDA Toolkit not found")
 endif()
