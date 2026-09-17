@@ -10,6 +10,67 @@
 
 LLM inference in C/C++
 
+## Experimental work in this fork
+
+> This is a personal experimental fork of
+> [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp), created to
+> explore multimodal runtime configuration, quantization, and CUDA inference
+> kernels. It is not an official llama.cpp distribution, and the upstream
+> defaults remain the recommended production paths.
+
+### 1. Independent multimodal-projector backend selection
+
+Added `--mmproj-backend BACKEND` and `LLAMA_ARG_MMPROJ_BACKEND` to select the
+GGML device used by the multimodal projector independently from the base model.
+
+- Validates registered device names and points invalid values to `--list-devices`.
+- Threads the setting through the common, MTMD, and CLIP/projector context
+  parameters.
+- Uses this precedence for the projector backend:
+
+  ```text
+  --mmproj-backend
+      > MTMD_BACKEND_DEVICE
+      > automatic GPU selection
+      > CPU fallback
+  ```
+
+- Supports an explicit `CPU` projector backend even when the text model runs on
+  CUDA.
+- Works through both `llama-mtmd-cli` and `llama-server`.
+- Leaves base-model `--device`, `--gpu-layers`, and model-loading behavior
+  unchanged.
+
+### 2. Q4_HQQ quantization exploration
+
+Added experimental `Q4_HQQ` quantization support for CPU inference work.
+
+- Added the quantization option and core format handling.
+- Implemented scalar and x86 SIMD dot-product paths.
+- Added CPU validation coverage.
+- Enabled `Q4_HQQ` selection as a KV-cache type.
+
+### 3. Llama 3.2 Split-K Flash Decode exploration
+
+Added an opt-in CUDA decode-attention path for Llama 3.2-1B.
+
+- Started with a custom four-warp decode kernel.
+- Implemented Split-K Flash Decoding: split a long KV history into parallel
+  chunks, compute partial online-softmax states, then reduce them safely.
+- Added GQA-aware routing, guarded fallback behavior, and pooled CUDA workspace
+  management.
+- Added validation tooling covering FP64 reference comparison, boundary and
+  routing checks, teacher-forced token and distributional comparisons,
+  perplexity, and deterministic generation.
+- Benchmarked on a Tesla T4. At 8192-token context, Split-K reached
+  **55.0 tok/s** - **2.2x faster** than the earlier custom CUDA design.
+
+The Split-K path remains opt-in: it is a validated research implementation, but
+it still trails llama.cpp's mature built-in `mma_f16` CUDA path. The goal of
+this work is to document the full kernel-engineering process - design, runtime
+integration, correctness validation, and performance measurement - not to
+replace upstream defaults.
+
 ## Recent API changes
 
 - [Changelog for `libllama` API](https://github.com/ggml-org/llama.cpp/issues/9289)
